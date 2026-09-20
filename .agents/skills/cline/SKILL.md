@@ -50,8 +50,14 @@ trusted blindly.
 ├── SKILL.md              ← this file
 ├── cline-rotate.sh       ← the supervisor (bash, no deps beyond cline + python3)
 ├── cline_Models_Free_Make.sh         ← regenerates the catalogue below from the cline binary
-└── cline-models-free.txt ← every free model id, one per line (generated)
+└── cline-models-free.txt ← every free model id, one per line, no names (generated)
 ```
+
+`cline-rotate.sh` shares `~/.ai-rotate/model-stats.json` with the OpenCode and
+FreeBuff supervisors via `../_shared/model-stats.py`: probe results are reused
+across skills, and rotation order follows measured stability instead of the file
+order. See [`../_shared/README.md`](../_shared/README.md). Disable with
+`CLINE_NO_STATS=1`.
 
 `models_4_rotattion.txt` is your own priority list of display names; it is
 independent of the catalogue and the supervisor does **not** read it — it exists

@@ -62,3 +62,93 @@ free
 Изучи .agents/skills/cline. 
 Можно ли аналогичное сделать для .agents/skills/FreeBuff.
 Для freebuff есть /Users/michaelpopov/Documents/GitHub/_Different/AI/freebuff-account-manager/
+
+
+2026-09-20 11-46-42
+michaelpopov@Mac-mini-Michael AI-Pobisk-Commander % .agents/skills/freebuff/freebuff-rotate.sh --trust-agents --continue
+[2026-09-20 11:43:13] == chosen account=consolidation20111@gmail.com model=deepseek/deepseek-v4-flash
+restored consolidation20111@gmail.com -> /Users/michaelpopov/.config/manicode/credentials.json
+[2026-09-20 11:43:13]   restored credentials.json (previous copy kept as credentials.json.bak)
+freebuffModel already deepseek/deepseek-v4-flash
+[2026-09-20 11:43:13]   pinned model=deepseek/deepseek-v4-flash in settings.json
+[2026-09-20 11:43:13]   launch model=deepseek/deepseek-v4-flash account=consolidation20111@gmail.com args=--trust-agents --continue
+
+получил
+
+Start coding for free    3 day streak    🟢🟢🟢⚪⚪⚪⚪
+
+┌────────────────────────────────────────────────────────────────────────┐
+│  GLM 5.3 Flash · Deep reasoning · Reasoning: max · Images · NEW        │
+│                         5 Freebucks/hr                                 │
+│  Not enough Freebucks — 5 Freebucks/hr against 0 left. Enter opens plans.│
+└────────────────────────────────────────────────────────────────────────┘
+
+FREE · 0/25 Freebucks daily · resets in 12h 17m
+
+А где же переключение на аккаунт с ненулевыми Freebucks ?
+
+Сделай чтобы freebuff-rotate.sh сам добавлял --trust-agents
+
+===
+Изучи .agents/skills/cline.
+Сделай .agents/skills/Kilo c ротацией аккаунтов и моделей, промпт при запуске не обязателен
+
+===
+Не вижу в .agents/skills/OpenCode аналогов 
+.agents/skills/cline/cline_Models_Free_Make.sh
+.agents/skills/cline/cline-models-free.txt
+.agents/skills/cline/models_4_rotattion.txt
+
+пусть скрипты 
+.agents/skills/cline/cline_Models_Free_Make.sh
+.agents/skills/cline/FreeBuff_Models_Free_Make.sh
+.agents/skills/opencode/opencode_Models_Free_Make.sh
+создают списки моделей только с id, без названий
+
+Что полезного для нашего проекта запуска cli ии агентов с ротациями аккаунтов и моделей можно взять из https://github.com/vava-nessa/free-coding-models ?
+
+Если что хорошее есть в https://github.com/vava-nessa/free-coding-models, сохрани в проект.
+
+====
+
+Нужно настроить безопасную систему хранения ключей апи в проекте.
+Ключи возьми из /Users/michaelpopov/Downloads/keys.txt
+
+Удали каталог .agents/skills/Qwen - у qwenа сейчас нет бесплатного.
+Путь NVIDIA CLI использует любые бесплатные модели.
+Как и где использовать модели https://tokenharbor.ai/models?category=free?
+
+2026-09-20 18-14-55
+Запускной файл должен называться ai_Pobisk.
+После запуска он должен выполнить задачи в configs/tasks используя .agents/skills.
+Модели будут иногда останавливаться, ai_Pobisk должен знать об этом и выяснять - фатальная это ошибка или можно продолжить, если можно, то продолжить. Иногда модели будут спрашивать ai_Pobisk должен понять - в его ли компетенции этот вопрос и отвечать.
+Получается ai_Pobisk должен сначала себе настроить ии моделью.
+Постепенно способности ai_Pobisk будем увеличивать, выводя на уровень современных harness.
+
+
+2026-09-20 20-54-14
+Я специально удалил папку Docs, файл План.md.
+Поясни как организована параллельность выполнения задач?
+Поясни как организована очередь агентов, например:
+- задач больше чем агентов в .agents/skills
+- задач меньше чем агентов в .agents/skills.
+Некоторые модели во время работы могут написать наподобие "Press Enter to continue", затем ожидают ввод промпта пользователем.
+Поясни как организована система обеспечения продолжения работы моделей, ведь модели любят останавливаться, хотя задача не подразумевает остановки?
+ai_Pobisk должен понять нужен пользователь или нет, если не нужен, то заставить модель работать дальше.
+Сделана ли ротация логов?
+===
+запустил michaelpopov@Mac-mini-Michael AI-Pobisk-Commander % .agents/skills/nvidia/nvidia-rotate.sh несколько минут подождал - программа не завершается, в консоль ничего не выводится, файл моделей не создался.
+The skill name 'nvidia' should match the folder name 'NVIDIA'. Значит нужно переименовать в .agents/skills названия папок в нижний регистр.
+===
+Используя /Users/michaelpopov/.claude/skills/drakonhub/ создай схему работы этого проекта в виде диаграммы DRAKON в файл Работа.drakon
+===
+Дай план создания мониторинга работы ai_Pobisk.sh в файл План_Мониторинг.md
+
+
+2026-09-20 21-35-37
+Пора уже коммит и пуш.
+Не пойму, мы имеем в этом проекте https://github.com/trailhq/Graft или нет? Говорят он ускоряет работу с ии.
+Проблемы останова модели должен решать не наш код, а мета-модель. Код не сможет охватить всё многообразие поведения моделей.
+Проверь проект и где код не справится, он должен подключать модель, просить её проанализировать и дать один из оговоренных вариантов ответа, ии помогает, но все инварианты должны быть прописаны в коде, включая странные и неизвестные.
+Пора уже коммит и пуш.
+Реализуй План_Мониторинг.md

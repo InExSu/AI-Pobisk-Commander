@@ -1,1 +1,26 @@
 .DS_Store
+
+# Secrets — never commit keys. The real store lives in ~/.ai-rotate/secrets.json
+# (mode 0600, outside the repo); see .agents/skills/_shared/SECRETS.md
+*.env
+.env
+.env.*
+secrets.json
+secrets*.json
+keys.txt
+*.key
+*.pem
+.ai-rotate/
+
+# Local caches / installed deps that leaked into the tree
+node_modules/
+__pycache__/
+.opencode/
+
+# ai_Pobisk runtime state (journal + resume state), per-machine
+.ai_pobisk/
+.ai_pobisk_test/
+.ignore
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

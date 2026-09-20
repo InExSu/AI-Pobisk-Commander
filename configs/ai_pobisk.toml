@@ -1,0 +1,161 @@
+# ai_Pobisk — configuration
+#
+# TOML, not YAML: python 3.11+ ships `tomllib` in the stdlib, but has no YAML
+# parser. Adding a YAML dependency would break the "clone and run" property.
+
+# ── Meta model: the model ai_Pobisk itself reasons with ───────────────────────
+# Separate from the worker: the worker writes code, the meta decides what to do
+# next. It is called on every stop, so it must be fast and cheap.
+[meta]
+max_tokens = 512
+timeout_sec = 90
+require_json = true
+# Re-ask once if the answer is not JSON, then fall back to rules.
+max_reparse = 1
+
+# Tried in order; the first one that answers becomes the meta model.
+[[meta.candidates]]
+skill = "nvidia"
+model = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+note = "fast, small, healthy"
+
+[[meta.candidates]]
+skill = "nvidia"
+model = "z-ai/glm-5.3-flash"
+note = "S+ but slow (60-130s cold)"
+
+[[meta.candidates]]
+skill = "tokenharbor"
+model = "qwen3.8-flash:free"
+note = "AA #19, cheap"
+
+# ── Fallback when the meta model is unreachable ───────────────────────────────
+# Degrade, never freeze. `rules_only` uses the classify.py table with no LLM.
+[fallback]
+on_meta_unavailable = "rules_only"
+# If the meta says fatal with confidence below this, treat it as recoverable
+# and try rotating instead of stopping.
+fatal_confidence_floor = 0.7
+
+# ── Budgets: hard caps, no infinite loops ─────────────────────────────────────
+[budget]
+max_retries_per_step = 3
+max_model_rotations = 10
+max_account_rotations = 5
+max_meta_calls_per_task = 40
+# Wall clock for the WHOLE run (all tasks), not per task. Four tasks on a
+# 44k-file repo at ~10 min each needs hours, not one hour.
+max_wall_clock_sec = 21600
+max_steps_per_task = 50
+# Absolute backstop on attempts within one step. Meta verdicts and invariant
+# rotations can both ask for "try again"; this bounds them so a wrong verdict
+# costs a bounded amount instead of hanging the run.
+max_iterations_per_step = 40
+# How many times to answer a confirmation prompt before giving up. A model
+# looping on "Press Enter" would otherwise be nudged forever.
+max_nudges_per_step = 5
+# Attempts faster than this are configuration failures (missing binary, bad
+# path), not real work — the supervisor paces them instead of spinning.
+min_step_ms = 2000
+# Per-step wall clock. A real agent (cline/opencode) reads files, runs tests
+# and edits code: 10 min is a normal task, not a hang. The 600s default was
+# cutting real work off mid-flight and reporting it as a model failure.
+step_timeout_sec = 1800
+
+# ── Concurrency ───────────────────────────────────────────────────────────────
+# Tasks are independent markdown files, so several can run at once — but only
+# one agent may touch a given task, and two agents editing the same repo at the
+# same time would corrupt it. So:
+#   * parallelism is ACROSS tasks, never within one task;
+#   * each task is locked to one skill for its whole run;
+#   * the cap is clamped to the number of available workers
+#     (tasks > agents -> they queue; tasks < agents -> extra agents idle).
+#
+# same_repo_guard: when every task resolves to the SAME target repo, parallel
+# runs are unsafe (concurrent edits to shared files), so it degrades to 1.
+# Set false only when your tasks touch disjoint paths.
+[parallel]
+enabled = true
+max_parallel_tasks = 3
+same_repo_guard = true
+
+# ── Worker dispatch order ─────────────────────────────────────────────────────
+# First available wins; on rotate_account/rotate_model the supervisor walks on.
+#
+# ORDER IS BY CAPABILITY, NOT BY RELIABILITY.
+# cline/opencode run a real agent with file tools (read/grep/edit/shell) — they
+# can actually do a task. nvidia/tokenharbor are bare chat-completion calls:
+# the model has NO filesystem, so "read AGENTS.md and run the tests" is
+# impossible for them and they answer "I cannot access your files" — which
+# looks like success (exit 0, polite prose) and silently completes nothing.
+# Agent skills first; API skills only as a last resort.
+[workers]
+order = ["cline", "opencode", "nvidia", "tokenharbor"]
+# freebuff is a TUI with no prompt mode: capacity probe only, never a worker.
+non_workers = ["freebuff"]
+
+# A bare API call cannot use tools. When the reply says so, treat it as
+# "this worker cannot do it" and move on rather than recording success.
+[workers.no_filesystem]
+# Patterns that mean: the model has no access to the target files.
+patterns = [
+  "I don't have access to (your |the )?(file|filesystem|local files)",
+  "I do not have access to (your |the )?(file|filesystem|local files)",
+  "I cannot access (your |the )?(file|filesystem|local files|that path)",
+  "I can't access (your |the )?(file|filesystem|local files|that path)",
+  "no access to (the |your )?file",
+  "does not contain that path",
+  "не имею доступа к файловой системе",
+  "нет доступа к файл",
+  "cannot directly access",
+  "if you can paste the contents",
+]
+# Skills whose calls are bare completions (no tools) — the check applies.
+skills = ["nvidia", "tokenharbor"]
+
+# ── Questions from the model ──────────────────────────────────────────────────
+[questions]
+# Files that define ai_Pobisk's competence. A question answerable from these is
+# answered without involving the owner.
+auto_answer_from = ["AGENTS.md", "README.md", "configs/", "docs/"]
+ask_owner_when_confidence_below = 0.6
+max_pending = 3
+owner_timeout_sec = 600
+
+# ── Code-graph context (Graft) ────────────────────────────────────────────────
+# Prepends a ranked code-graph context + repo map to every worker prompt, so the
+# model starts with a map instead of re-exploring the repo. Measured by Graft:
+# ~42% fewer tokens, ~46% fewer tool calls, ~60% less time, equal correctness.
+#
+# `graft build` and every read command are deterministic tree-sitter: no model,
+# no key, no network. Safe to leave on. If graft is missing or graft/ is not
+# built, the prompt is passed through untouched.
+[graft]
+enabled = true
+# Which repo to map. "" = this project; point it at the task's target repo.
+repo = ""
+# Cap on the prepended block, in characters.
+max_context_chars = 4000
+
+# ── Tasks ─────────────────────────────────────────────────────────────────────
+[tasks]
+dir = "configs/tasks"
+# Empty markdown files are skipped with a note, not treated as failures.
+skip_empty = true
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+# Events go to .ai_pobisk/events.jsonl (one JSON per line). `status --live`,
+# `watch`, `check`, `serve` and `report` all read it; nothing else is needed.
+[monitor]
+# Share of attempts ending fatal/loop_guard before we call it a config problem.
+max_fatal_share = 0.3
+# Total nudges per run before "the model is stuck asking for confirmation".
+max_nudges_total = 6
+# Shell command run when `check` finds issues (e.g. a Telegram ping).
+notify_cmd = ""
+
+# ── State ─────────────────────────────────────────────────────────────────────
+[state]
+dir = ".ai_pobisk"
+journal = "journal.md"
+state_file = "state.json"

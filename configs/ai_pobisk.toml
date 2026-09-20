@@ -151,6 +151,9 @@ skip_empty = true
 max_fatal_share = 0.3
 # Total nudges per run before "the model is stuck asking for confirmation".
 max_nudges_total = 6
+# Parked (auth_error) models collapse rotation depth silently. Flag when a
+# skill has more than this many.
+max_auth_error_models = 8
 # Shell command run when `check` finds issues (e.g. a Telegram ping).
 notify_cmd = ""
 

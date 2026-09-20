@@ -39,17 +39,94 @@ def build(repo_root, verbose=True):
     return cfg, adapters
 
 
-def cmd_skills(repo_root, args):
-    cfg, adapters = build(repo_root)
-    print("%-14s %-10s %s" % ("skill", "available", "role"))
+def _skill_health(repo_root, cfg, adapters):
+    """Per-skill health from model-stats.json + liveness. Pure-ish, no models.
+
+    Returns {skill: {available, role, models, live, cooling, auth, p95, calls}}
+    """
+    import json as _json
+    store = os.path.join(os.environ.get("AI_ROTATE_DIR")
+                         or os.path.expanduser("~/.ai-rotate"),
+                         "model-stats.json")
+    try:
+        stats = _json.load(open(store))
+    except Exception:
+        stats = {}
+
+    out = {}
     non_workers = set(cfg["workers"]["non_workers"])
     for name in cfg["workers"]["order"] + list(non_workers):
         a = adapters.get(name)
         if not a:
             continue
-        role = "capacity probe" if name in non_workers else "worker"
-        print("%-14s %-10s %s" % (name, "yes" if a.available() else "NO", role))
-    return 0
+        ent = stats.get(name) or {}
+        now = time.time()
+        cooling = sum(1 for e in ent.values()
+                      if (e.get("cooldown_until") or 0) > now)
+        auth = sum(1 for e in ent.values() if e.get("state") == "auth_error")
+        live = sum(1 for e in ent.values()
+                   if e.get("state") in ("healthy", "recovering"))
+        calls = sum((e.get("uptime") or [0, 0])[1] for e in ent.values())
+        p95s = [e.get("p95") or 0 for e in ent.values()
+                if (e.get("uptime") or [0, 0])[0]]
+        out[name] = {
+            "available": a.available(),
+            "role": "capacity probe" if name in non_workers else "worker",
+            "models": len(ent),
+            "live": live,
+            "cooling": cooling,
+            "auth": auth,
+            "calls": calls,
+            "p95": round(max(p95s), 1) if p95s else 0,
+        }
+    return out
+
+
+def cmd_skills(repo_root, args):
+    cfg, adapters = build(repo_root)
+    probe = getattr(args, "probe", False)
+    health = _skill_health(repo_root, cfg, adapters)
+
+    print("%-12s %-9s %-9s %-7s %-8s %-5s %s"
+          % ("skill", "available", "role", "models", "live/cool", "calls", "p95"))
+    for name, h in health.items():
+        print("%-12s %-9s %-9s %-7d %-8s %-5d %s"
+              % (name,
+                 "yes" if h["available"] else "NO",
+                 h["role"],
+                 h["models"],
+                 "%d/%d" % (h["live"], h["cooling"]),
+                 h["calls"],
+                 ("%.0fms" % h["p95"]) if h["p95"] else "-"))
+        if h["auth"]:
+            print("%-12s   %d model(s) parked: auth error — needs a human"
+                  % ("", h["auth"]))
+
+    if not probe:
+        print()
+        print("(add --probe to actually ping each model — costs one ask per model)")
+        return 0
+
+    # --probe: real calls. Deliberately opt-in: it spends quota.
+    print()
+    print("probing (one ask per model)...")
+    ok = 0
+    total = 0
+    for name, a in adapters.items():
+        if not a.available():
+            continue
+        for m in (a.models() if hasattr(a, "models") else []):
+            total += 1
+            o = a.run("Reply with exactly: ok", model=m,
+                      timeout=int(cfg["meta"]["timeout_sec"]))
+            flag = "OK  " if o.outcome == "ok" else o.outcome.upper()
+            print("  %-12s %-46s %-14s %sms"
+                  % (name, m[:46], flag, o.elapsed_ms))
+            if o.outcome == "ok":
+                ok += 1
+    print()
+    print("%d/%d alive" % (ok, total))
+    return 0 if ok else 1
 
 
 def cmd_list(repo_root, args):
@@ -146,6 +223,20 @@ def cmd_check(repo_root, args):
     m = metrics.Metrics(repo_root, cfg)
     summ = metrics.summarize(m.events(run=m.run))
     issues = metrics.check_thresholds(summ, cfg)
+
+    # Skill health: parked (auth_error) models silently collapse rotation
+    # depth — nobody notices until every model is gone.
+    cfg2, adapters = build(repo_root)
+    mon = cfg.get("monitor") or {}
+    max_auth = int(mon.get("max_auth_error_models", 8))
+    for name, h in sorted(_skill_health(repo_root, cfg2, adapters).items()):
+        if h["auth"] > max_auth:
+            issues.append("скилл %s: запарковано %d моделей по auth error — "
+                          "проверить ключи" % (name, h["auth"]))
+        if h["models"] and h["live"] == 0:
+            issues.append("скилл %s: нет живых моделей (все в cooldown или "
+                          "запаркованы)" % name)
+
     cmd = (cfg.get("monitor") or {}).get("notify_cmd") or ""
     if not issues:
         print("ok — no thresholds breached")
@@ -166,7 +257,7 @@ def cmd_check(repo_root, args):
 def cmd_serve(repo_root, args):
     """Prometheus-compatible /metrics on stdlib http.server. No deps."""
     import http.server
-    cfg, _ = build(repo_root)
+    cfg, adapters = build(repo_root)
     m = metrics.Metrics(repo_root, cfg)
     port = int(getattr(args, "port", 9099) or 9099)
 
@@ -175,6 +266,12 @@ def cmd_serve(repo_root, args):
             if self.path.startswith("/metrics"):
                 summ = metrics.summarize(m.events(run=m.run))
                 body = metrics.prometheus(summ, cfg).encode("utf-8")
+                try:
+                    body += metrics.skill_health_prometheus(
+                        repo_root, cfg, adapters,
+                        _skill_health(repo_root, cfg, adapters)).encode("utf-8")
+                except Exception:
+                    pass
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; version=0.0.4")
                 self.send_header("Content-Length", str(len(body)))
@@ -417,6 +514,8 @@ def main():
     ap.add_argument("--interval", type=float, default=5.0,
                     help="watch refresh seconds")
     ap.add_argument("--port", type=int, default=9099, help="serve port")
+    ap.add_argument("--probe", action="store_true",
+                    help="skills: really ping each model (spends one ask each)")
     args = ap.parse_args()
 
     repo_root = os.environ.get("AI_POBISK_ROOT") or _ROOT

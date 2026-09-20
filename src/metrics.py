@@ -215,6 +215,28 @@ def check_thresholds(summary, cfg):
     return issues
 
 
+def skill_health_prometheus(repo_root, cfg, adapters, health):
+    """Expose per-skill health so a dashboard can see parked/cooling models."""
+    esc = lambda v: str(v).replace("\\", "\\\\").replace('"', '\\"')
+    lines = [
+        "# HELP aipobisk_skill_models Number of models tracked for a skill",
+        "# TYPE aipobisk_skill_models gauge",
+        "# HELP aipobisk_skill_cooling Models in cooldown",
+        "# TYPE aipobisk_skill_cooling gauge",
+        "# HELP aipobisk_skill_auth_error Models parked on an auth error",
+        "# TYPE aipobisk_skill_auth_error gauge",
+    ]
+    for name in sorted(health):
+        h = health[name]
+        lines.append('aipobisk_skill_models{skill="%s"} %d'
+                     % (esc(name), h["models"]))
+        lines.append('aipobisk_skill_cooling{skill="%s"} %d'
+                     % (esc(name), h["cooling"]))
+        lines.append('aipobisk_skill_auth_error{skill="%s"} %d'
+                     % (esc(name), h["auth"]))
+    return "\n".join(lines) + "\n"
+
+
 def prometheus(summary, cfg):
     """Prometheus text exposition format. Enough for a scrape; no deps."""
     lines = []

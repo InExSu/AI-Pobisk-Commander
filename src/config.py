@@ -46,7 +46,7 @@ DEFAULTS = {
                  "same_repo_guard": True},
     "logs": {"max_bytes": 1_000_000, "keep": 3, "journal_max_bytes": 2_000_000},
     "monitor": {"max_fatal_share": 0.3, "max_nudges_total": 6,
-                "notify_cmd": ""},
+                "max_auth_error_models": 8, "notify_cmd": ""},
     "tasks": {"dir": "configs/tasks", "skip_empty": True},
     "state": {"dir": ".ai_pobisk", "journal": "journal.md",
               "state_file": "state.json"},

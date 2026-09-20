@@ -68,6 +68,11 @@ MAX_SAMPLES = 20            # rolling window of latency samples
 COOLDOWN_FAILS = 3          # consecutive failures before the breaker opens
 COOLDOWN_SEC = 900          # 15 min: shorter than a daily quota reset, long
                             # enough to stop burning the rotation every loop
+AUTH_PARK_SEC = 86400      # 24h: how long a bad-credential model stays
+                            # parked. Finite on purpose — a permanent park
+                            # made rotation collapse to one model unnoticed.
+                            # After the expiry it is retried once.
+AUTH_MAX_PARKS = 3         # parked this many times -> stop retrying for good
 P95_CAP_MS = 8000           # probes are whole CLI asks, not 1-token pings
 JITTER_CAP_MS = 3000
 SPIKE_MS = 5000             # a probe above this counts as a spike
@@ -97,7 +102,7 @@ def save(d):
 def blank():
     return {
         "samples": [], "p95": 0, "jitter": 0, "uptime": [0, 0],
-        "stability": 0, "fails": 0, "cooldown_until": 0,
+        "stability": 0, "fails": 0, "cooldown_until": 0, "parks": 0,
         "state": "unknown", "last_ok": 0, "last_err": "", "updated": 0,
     }
 
@@ -215,10 +220,15 @@ def cmd_record(argv):
         e["fails"] = (e.get("fails") or 0) + 1
         e["last_err"] = (err or verdict)[:200]
         if verdict == "auth":
-            # Bad credentials never recover by retrying: park the model until
-            # the human fixes the key. Not counted as a transient failure.
+            # Bad credentials do not heal by retrying, so they are parked
+            # rather than retried. But NOT forever: accounts get re-authed,
+            # keys get rotated, and a permanent park silently collapses
+            # rotation depth (19 of cline's 20 models ended up parked once,
+            # from failures that were actually the account's, not the
+            # model's). Park with an expiry, then let it be tried again.
             e["state"] = "auth_error"
-            e["cooldown_until"] = 0
+            e["cooldown_until"] = now + AUTH_PARK_SEC
+            e["parks"] = (e.get("parks") or 0) + 1
         elif e["fails"] >= COOLDOWN_FAILS:
             e["state"] = "down"
             e["cooldown_until"] = now + COOLDOWN_SEC
@@ -285,9 +295,16 @@ def cmd_order(argv):
         if e is None:
             unknown.append((rank, 0.0, m))
             continue
-        if e.get("state") == "auth_error":
-            continue                      # dropped: needs a human, not a retry
         cd = float(e.get("cooldown_until") or 0)
+        if e.get("state") == "auth_error":
+            # Parked. Still parked -> skip. Park expired -> give it one more
+            # chance, unless it has already been parked the max number of
+            # times (then it is genuinely broken and we stop asking).
+            if cd > now:
+                continue
+            if (e.get("parks") or 0) >= AUTH_MAX_PARKS:
+                continue
+            e["state"] = "recovering"
         if e.get("state") == "down" and cd > now:
             cooling.append((cd, rank, m))  # retried only after cooldown
             continue

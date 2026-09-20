@@ -87,6 +87,49 @@ def rotate_all(repo_root, cfg, extra_paths=()):
     return done
 
 
+def sweep_stats(store_path, max_parks=3, unknown_max_age=7 * 86400):
+    """Drop health entries that can never be useful again.
+
+    Two kinds of junk accumulate in the store and quietly shrink rotation:
+      * models parked past the retry limit (`parks >= max_parks`) — they are
+        excluded from ordering anyway, they just keep inflating the count and
+        tripping the "parked models" alert;
+      * entries that were never once successful and have not been touched in
+        `unknown_max_age` — leftovers from experiments and one-off failures.
+    """
+    import json
+    if not os.path.exists(store_path):
+        return 0
+    try:
+        with open(store_path) as f:
+            d = json.load(f)
+    except Exception:
+        return 0
+    import time
+    now = time.time()
+    dropped = 0
+    for skill, models in (d or {}).items():
+        if not isinstance(models, dict):
+            continue
+        for mid in list(models):
+            e = models[mid] or {}
+            too_parked = (e.get("parks") or 0) >= max_parks
+            stale = ((e.get("uptime") or [0, 0])[0] == 0
+                     and (now - (e.get("updated") or 0)) > unknown_max_age)
+            if too_parked or stale:
+                models.pop(mid, None)
+                dropped += 1
+    if dropped:
+        try:
+            tmp = store_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(d, f, indent=2, sort_keys=True)
+            os.replace(tmp, store_path)
+        except OSError:
+            return 0
+    return dropped
+
+
 def trim_stats(store_path, max_samples=20, max_models_per_skill=200):
     """Cap the health store: sample lists and model count per skill.
 

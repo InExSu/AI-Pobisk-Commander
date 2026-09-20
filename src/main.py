@@ -422,6 +422,9 @@ def cmd_run(repo_root, args):
                              "model-stats.json")
         if logrot.trim_stats(store):
             print("trimmed: model-stats.json")
+        swept = logrot.sweep_stats(store)
+        if swept:
+            print("swept %d dead entr(y/ies) from model-stats.json" % swept)
     except Exception as e:
         print("logrot skipped: %s" % type(e).__name__)
 

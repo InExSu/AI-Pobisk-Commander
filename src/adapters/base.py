@@ -69,19 +69,51 @@ class Adapter:
         return o
 
     def _record(self, o):
-        """Feed the shared health store, if it is available."""
+        """Feed the shared health store, if it is available.
+
+        CRITICAL: `auth` parks a model PERMANENTLY. It must mean only one
+        thing — this model's credential is broken. It must never be used for
+        "the account ran out", "the call timed out" or "something odd
+        happened": that is how 19 of cline's 20 healthy models ended up
+        parked during experiments, collapsing rotation to a single model
+        without anyone noticing. When in doubt, record `fail` (transient,
+        recovers on its own) instead.
+        """
         try:
             import sys
             _shared = os.path.join(self.repo_root, ".agents", "skills", "_shared")
             if _shared not in sys.path:
                 sys.path.insert(0, _shared)
             import model_stats
-            verdict = {"ok": "ok", "rotate_account": "auth",
-                       "fatal": "auth"}.get(o.outcome, "fail")
-            model_stats.cmd_record([self.skill, o.model or "unknown", verdict,
+
+            verdict = "fail"
+            if o.outcome == "ok":
+                verdict = "ok"
+            elif o.outcome == "rotate_account" and self._is_credential_failure(o):
+                verdict = "auth"
+
+            # Never park a model we could not even name — that writes junk
+            # entries like skill:"unknown" into the store.
+            model = o.model or ""
+            if not model:
+                return
+            model_stats.cmd_record([self.skill, model, verdict,
                                     str(o.elapsed_ms), o.detail])
         except Exception:
             pass  # health store is best-effort; never block the supervisor
+
+    @staticmethod
+    def _is_credential_failure(o):
+        """True only when the CREDENTIAL is bad, not the account's balance."""
+        d = (o.detail or "").lower()
+        if o.http in (401, 403):
+            return True
+        for s in ("credential rejected", "auth error", "invalid api key",
+                  "unauthorized", "unauthenticated", "no authtoken",
+                  "no api key", "missing api key", "not authenticated"):
+            if s in d:
+                return True
+        return False
 
     def available(self):
         """Is this skill usable right now? (script exists, key present.)"""

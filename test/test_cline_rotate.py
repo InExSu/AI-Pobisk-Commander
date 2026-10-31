@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -114,6 +115,91 @@ echo "Error: 402 credit insufficient"; exit 1
             run(env)
             seen = tried(log)
         self.assertEqual(len(seen), len(set(seen)), "account tried twice: %s" % seen)
+
+
+class TestSilentModel(unittest.TestCase):
+    """A model that stops answering must cost one model, not the whole step.
+
+    Seen live: cline accepted the prompt, wrote nothing for ten minutes, and
+    the supervisor sat inside one call until its 30-minute step timeout. The
+    bound is cline's own --timeout — an external watchdog cannot be used here,
+    because a `kill` from a background subshell is not allowed on every host.
+    """
+
+    def fake(self, tmp, log, body):
+        fake = os.path.join(tmp, "cline")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\n"
+                    "prev=\"\"\n"
+                    "case \" $* \" in *\" --auto-approve true \"*) run=1 ;; *) run=0 ;; esac\n"
+                    "for a in \"$@\"; do\n"
+                    "  [ \"$run\" = 1 ] && [ \"$prev\" = \"--data-dir\" ] && echo \"$a\" >> \"%s\"\n"
+                    "  prev=\"$a\"\n"
+                    "done\n"
+                    "case \" $* \" in *\" --auto-approve false \"*) echo ok; exit 0 ;; esac\n"
+                    "%s\n" % (log, body))
+        os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+        return fake
+
+    def test_run_timeout_is_passed_to_cline(self):
+        # Without the flag the script has no bound at all; the whole point is
+        # that the binary gives up by itself.
+        with tempfile.TemporaryDirectory() as tmp:
+            env, log, _ = make_env(tmp)
+            args = os.path.join(tmp, "args.txt")
+            fake = self.fake(tmp, log, 'echo "$@" > "%s"; echo "done"; exit 0' % args)
+            env["CLINE_BIN"] = fake
+            env["CLINE_RUN_TIMEOUT"] = "77"
+            run(env)
+            with open(args, encoding="utf-8") as f:
+                argv = f.read()
+        self.assertIn("--timeout 77", argv)
+
+    def test_silent_worker_is_killed_by_the_stall_guard(self):
+        # No output, no session files: the guard must end the call on its own.
+        # Waiting for the supervisor's 30-minute step timeout is what made a
+        # hung provider cost the whole run.
+        with tempfile.TemporaryDirectory() as tmp:
+            env, log, _ = make_env(tmp)
+            fake = self.fake(tmp, log, "sleep 30")
+            env["CLINE_BIN"] = fake
+            env["CLINE_MODELS"] = "m1"
+            env["CLINE_STALL_WINDOW"] = "2"
+            env["CLINE_STALL_CHECK"] = "1"
+            started = time.time()
+            p = run(env)
+            elapsed = time.time() - started
+            with open(os.path.join(tmp, "logs", "cline-rotate.log"),
+                      encoding="utf-8") as f:
+                rlog = f.read()
+
+        self.assertLess(elapsed, 25, "the guard did not fire: %.0fs" % elapsed)
+        self.assertIn("stall", rlog)
+        self.assertEqual(p.returncode, 5)
+
+    def test_timeout_output_rotates_the_model_not_the_account(self):
+        # The credential answered the probe a second ago; only the model is
+        # mute. Switching accounts here would burn the fleet on one bad model.
+        with tempfile.TemporaryDirectory() as tmp:
+            env, log, _ = make_env(tmp)
+            fake = self.fake(tmp, log, """
+case " $* " in
+  *" -m m1 "*) echo "Request timed out"; exit 1 ;;
+esac
+echo "done"; exit 0""")
+            env["CLINE_BIN"] = fake
+            env["CLINE_MODELS"] = "m1 m2"
+            p = run(env)
+            seen = tried(log)
+            with open(os.path.join(tmp, "logs", "cline-rotate.log"),
+                      encoding="utf-8") as f:
+                rlog = f.read()
+
+        self.assertIn("next model, same account", rlog)
+        self.assertEqual(p.returncode, 0, "second model should have finished")
+        # Two attempts, both on the same --data-dir: the model rotated, the
+        # account did not.
+        self.assertEqual(set(seen), {"airegist01"}, "account switched: %s" % seen)
 
 
 if __name__ == "__main__":

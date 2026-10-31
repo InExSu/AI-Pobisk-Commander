@@ -80,6 +80,27 @@ def _target_dir_from_task(task):
     return parent if os.path.isdir(parent) else None
 
 
+def _reconcile_task_state(journal, task):
+    """A task file that changed is a new task, even if its name is the same.
+
+    state.json is keyed by file name, so editing an instruction used to be
+    invisible: `run_task` resumed at the recorded step and printed "done" in
+    one second. That is how a rewritten task got skipped three times in a row.
+    """
+    st = journal.task_state(task.name)
+    h = task.body_hash
+    old = st.get("body_hash")
+    if old and old != h:
+        journal.note(task.name,
+                     "task body changed (%s -> %s) — restarting from step 0"
+                     % (old, h))
+        journal.mark(task.name, "pending", 0)
+        st = journal.task_state(task.name)
+    st["body_hash"] = h
+    journal.save()
+    return st
+
+
 class Supervisor:
     def __init__(self, repo_root, cfg, adapters, meta, journal, verbose=True):
         self.repo_root = repo_root
@@ -114,7 +135,7 @@ class Supervisor:
     # ── one task ──────────────────────────────────────────────────────────────
     def run_task(self, task, dry_run=False):
         name = task.name
-        st = self.journal.task_state(name)
+        st = _reconcile_task_state(self.journal, task)
         self.journal.section("task %s" % name)
         self._say("task %s: %s" % (name, task.subtitle[:90]))
 

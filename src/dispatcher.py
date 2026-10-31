@@ -9,6 +9,7 @@ meta model learns to plan. Splitting paragraphs into steps now would create
 fragile tasks that fail on formatting alone.
 """
 
+import hashlib
 import os
 
 
@@ -23,6 +24,16 @@ class Task:
     @property
     def empty(self):
         return not self.body.strip()
+
+    @property
+    def body_hash(self):
+        """Fingerprint of the instruction, for resume.
+
+        state.json is keyed by file name, so editing a task used to be
+        invisible: the supervisor resumed at the old step and reported "done"
+        in one second. The hash is what makes an edited task a new task.
+        """
+        return hashlib.sha1((self.body or "").strip().encode("utf-8")).hexdigest()[:12]
 
     @property
     def subtitle(self):
@@ -84,13 +95,22 @@ def load_tasks(repo_root, cfg):
 
 
 def _split(raw, fallback_name):
-    """First markdown heading becomes the title; the rest is the body."""
+    """First markdown heading becomes the title; the rest is the body.
+
+    Text *before* the first heading stays in the body. It used to be dropped
+    as "preamble", which silently deleted real instructions — a task whose
+    first line was the target repo path lost that path, and the supervisor
+    then pointed the worker at the wrong repository. A title is a label; an
+    instruction above it is still an instruction.
+    """
     lines = raw.splitlines()
     for i, line in enumerate(lines):
         s = line.strip()
         if s.startswith("#"):
             title = s.lstrip("#").strip()
-            body = "\n".join(lines[i + 1:])
+            preamble = "\n".join(lines[:i]).strip()
+            rest = "\n".join(lines[i + 1:])
+            body = (preamble + "\n\n" + rest) if preamble else rest
             return title or fallback_name, body
     return fallback_name, raw
 

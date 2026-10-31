@@ -17,6 +17,9 @@
 #   CLINE_MODELS        space-separated model ids, first = preferred
 #   CLINE_BIN           cline binary         (default: cline from PATH)
 #   CLINE_RETRIES       --retries value      (default: 12)
+#   CLINE_RUN_TIMEOUT   seconds per real run (default: 900)
+#   CLINE_STALL_WINDOW  silence before the call is killed (default: 120)
+#   CLINE_STALL_CHECK   heartbeat poll interval      (default: 30)
 #   CLINE_PROBE_TIMEOUT seconds per probe    (default: 45)
 #   CLINE_MAX_ACCOUNT_ROUNDS account switch loop guard (default: number of accounts)
 #   CLINE_LOG_DIR       where to write cline-rotate.log (default: $CLINE_ACCOUNTS_DIR/../logs)
@@ -53,6 +56,18 @@ DEFAULT_MODELS=(
 ACCOUNTS_DIR="${CLINE_ACCOUNTS_DIR:-$HOME/.cline/accounts}"
 CLINE_BIN="${CLINE_BIN:-cline}"
 CLINE_RETRIES="${CLINE_RETRIES:-12}"
+# A provider that stops answering must cost one model, not the whole step.
+# cline has its own --timeout, so the bound lives inside the binary instead of
+# an external watchdog: killing child processes from a subshell is not allowed
+# on every host, and a rotate script that needs `kill` to make progress is a
+# rotate script that silently hangs where `kill` is denied.
+RUN_TIMEOUT="${CLINE_RUN_TIMEOUT:-900}"
+# Heartbeat: a provider that hangs mid-stream gives no error and no output.
+# Waiting for the supervisor's 30-minute step timeout wastes the whole budget,
+# so the run is watched every STALL_CHECK seconds: if the session files have
+# not grown for STALL_WINDOW seconds, the model is mute and the call is killed.
+STALL_WINDOW="${CLINE_STALL_WINDOW:-120}"
+STALL_CHECK="${CLINE_STALL_CHECK:-30}"
 PROBE_TIMEOUT="${CLINE_PROBE_TIMEOUT:-45}"
 LOG_DIR="${CLINE_LOG_DIR:-$ACCOUNTS_DIR/../logs}"
 mkdir -p "$LOG_DIR" 2>/dev/null || true
@@ -204,6 +219,15 @@ is_model_limit() {
 		[[ "$out" == *"Free model promotion ended"* ]]
 }
 
+# The model stopped answering: cline's own --timeout fired, or the provider
+# closed the stream. This is a model-level failure — the credential answered a
+# probe a minute ago — so the next model on the same account is the right move.
+is_timeout() {
+	local out="$1"
+	[[ "$out" == *"timed out"* ]] || [[ "$out" == *"timeout"* ]] ||
+		[[ "$out" == *"Timeout"* ]] || [[ "$out" == *"ETIMEDOUT"* ]]
+}
+
 # The account, not the model, is out: no credit, revoked key, hard quota.
 # Rotating the model inside this account cannot help — only another --data-dir.
 # Returns 0 (true) => switch account.
@@ -257,6 +281,46 @@ rotation_order() {
 
 # ── Record a probe result in the shared store ─────────────────────────────────
 # $1=model $2=verdict(ok|fail|auth|limit) $3=latency_ms $4=error text
+# Newest file a worker writes while it is thinking: its session log. If this
+# file's mtime stops moving, the model is not producing anything.
+newest_session_file() {
+	local dir="$1"
+	ls -t "$dir"/sessions/*/*.messages.json 2>/dev/null | head -1
+}
+
+mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+# Watch one run: every STALL_CHECK seconds take the newest sign of life —
+# the session file cline writes while it thinks, or the captured output.
+# Nothing moved for STALL_WINDOW -> the model is mute, kill the call.
+# The output file counts on purpose: a worker that never even started a
+# session (hung before the first token) must also be caught.
+stall_guard() {
+	local pid="$1" sess="$2" out="$3"
+	local now m mo f tick=0
+	while kill -0 "$pid" 2>/dev/null; do
+		# Sleep in one-second slices: a guard blocked in a single long sleep
+		# cannot be stopped when the run ends normally, and every normal run
+		# then pays STALL_CHECK seconds before the script can continue.
+		sleep 1
+		tick=$((tick + 1))
+		(( tick < STALL_CHECK )) && continue
+		tick=0
+		m=0
+		f="$(newest_session_file "$sess")"
+		[[ -n "$f" ]] && m="$(mtime_of "$f")"
+		[[ -f "$out" ]] && { mo="$(mtime_of "$out")"; (( mo > m )) && m="$mo"; }
+		now="$(date +%s)"
+		if (( now - m >= STALL_WINDOW )); then
+			clog "  stall  ${STALL_WINDOW}s без движения сессии ($f) -> kill $pid"
+			kill -TERM "$pid" 2>/dev/null
+			sleep 5
+			kill -9 "$pid" 2>/dev/null
+			return 0
+		fi
+	done
+}
+
 stats_record() {
 	[[ -z "$STATS" ]] && return 0
 	python3 "$STATS" record "$STATS_SKILL" "$1" "$2" "${3:-}" "${4:-}" 2>&1 |
@@ -412,7 +476,8 @@ while true; do
 	# Opt in with CLINE_SAVE_MODEL=1 if you want a "sticky winner" next time.
 	[[ "${CLINE_SAVE_MODEL:-0}" == "1" ]] && save_model "$ACCOUNT_DIR" "$model"
 
-	local_args=(--auto-approve true --retries "$CLINE_RETRIES" --data-dir "$ACCOUNT_DIR")
+	local_args=(--auto-approve true --retries "$CLINE_RETRIES" --data-dir "$ACCOUNT_DIR"
+		--timeout "$RUN_TIMEOUT")
 	[[ "$MODE" == "plan" ]] && local_args+=(-p)
 	[[ -n "$SESSION_ID" ]] && local_args+=(--id "$SESSION_ID")
 	[[ ${#EXTRA_ARGS[@]} -gt 0 ]] && local_args+=("${EXTRA_ARGS[@]}")
@@ -424,9 +489,38 @@ while true; do
 		exec "$CLINE_BIN" "${local_args[@]}"
 	fi
 
-	clog "  run    model=$model account=$ACCOUNT_NAME prompt=${PROMPT:0:60}..."
-	OUT="$("$CLINE_BIN" "${local_args[@]}" "$PROMPT" 2>&1)"
+	clog "  run    model=$model account=$ACCOUNT_NAME timeout=${RUN_TIMEOUT}s stall=${STALL_WINDOW}s prompt=${PROMPT:0:60}..."
+	RUN_OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/cline-run.XXXXXX")" || RUN_OUT_FILE=/dev/null
+	"$CLINE_BIN" "${local_args[@]}" "$PROMPT" >"$RUN_OUT_FILE" 2>&1 &
+	RUN_PID=$!
+	stall_guard "$RUN_PID" "$ACCOUNT_DIR" "$RUN_OUT_FILE" &
+	GUARD_PID=$!
+	wait "$RUN_PID"
 	RC=$?
+	kill "$GUARD_PID" 2>/dev/null
+	wait "$GUARD_PID" 2>/dev/null
+	OUT="$(cat "$RUN_OUT_FILE" 2>/dev/null)"
+	rm -f "$RUN_OUT_FILE"
+
+	if [[ $RC -eq 143 || $RC -eq 137 ]]; then
+		# The guard killed it after STALL_WINDOW seconds of silence. Same
+		# verdict as a provider timeout: the model is mute, the account is not.
+		clog "  stall  model=$model silent ${STALL_WINDOW}s -> next model, same account"
+		stats_record "$model" fail "" "stalled ${STALL_WINDOW}s"
+		DEAD_MODELS+=("$model")
+		GLOBAL_DEAD+=("$model|$ACCOUNT_NAME")
+		continue
+	fi
+
+	if is_timeout "$OUT"; then
+		# The provider stopped answering: this model is mute, the account is
+		# not. Drop the model and keep the account.
+		clog "  timeout model=$model -> next model, same account"
+		stats_record "$model" fail "" "run timeout ${RUN_TIMEOUT}s"
+		DEAD_MODELS+=("$model")
+		GLOBAL_DEAD+=("$model|$ACCOUNT_NAME")
+		continue
+	fi
 
 	if is_model_limit "$OUT"; then
 		clog "  limit hit mid-run on model=$model -> rotate"

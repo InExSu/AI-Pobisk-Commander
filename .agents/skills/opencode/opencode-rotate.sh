@@ -10,7 +10,8 @@
 #   --keep           reuse last working pair without re-probing
 #   --cfg DIR        accounts root (default ~/.opencode-accounts)
 #   --bin PATH       opencode binary (default: opencode on PATH)
-# Env: OC_MODELS, OC_ACCOUNTS_DIR, OC_BIN, OC_PROBE_TIMEOUT
+# Env: OC_MODELS, OC_ACCOUNTS_DIR, OC_BIN, OC_PROBE_TIMEOUT,
+#      OC_STALL_WINDOW (silence before kill, default 120), OC_STALL_CHECK (30)
 #      AI_ROTATE_DIR (shared model-health store, default ~/.ai-rotate)
 #      OC_NO_STATS=1  ignore the shared store, keep the built-in order
 set -u
@@ -133,14 +134,77 @@ run_isolated() { # $1=acct_dir, rest=argv — run opencode with full isolation
     "$BIN" "$@"
 }
 
+# opencode has no --timeout flag, so the bound is a heartbeat: every
+# STALL_CHECK seconds look at the newest file under the isolated data dir and
+# at the captured output. Nothing moved for STALL_WINDOW -> the model is mute.
+PROBE_TIMEOUT="${OC_PROBE_TIMEOUT:-45}"
+STALL_WINDOW="${OC_STALL_WINDOW:-120}"
+STALL_CHECK="${OC_STALL_CHECK:-30}"
+
+mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+newest_under() { # $1=dir -> mtime of the most recently written file inside
+  local newest=0 f m
+  while IFS= read -r f; do
+    m="$(mtime_of "$f")"
+    [ "$m" -gt "$newest" ] && newest="$m"
+  done < <(find "$1" -type f -maxdepth 5 2>/dev/null | head -200)
+  echo "$newest"
+}
+
+stall_guard() { # $1=pid $2=data_dir $3=out_file
+  local pid="$1" data="$2" out="$3" m mo now tick=0
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    tick=$((tick + 1))
+    [ "$tick" -lt "$STALL_CHECK" ] && continue
+    tick=0
+    m="$(newest_under "$data")"
+    [ -f "$out" ] && { mo="$(mtime_of "$out")"; [ "$mo" -gt "$m" ] && m="$mo"; }
+    now="$(date +%s)"
+    if [ $((now - m)) -ge "$STALL_WINDOW" ]; then
+      log "stall ${STALL_WINDOW}s without activity -> kill $pid"
+      kill -TERM "$pid" 2>/dev/null
+      sleep 5
+      kill -9 "$pid" 2>/dev/null
+      return 0
+    fi
+  done
+}
+
+# A probe has no output until it finishes, so a stall cannot be detected —
+# only a deadline. Without one, one mute model froze the whole rotation for
+# minutes (seen live: a probe sat from 21:50 to 21:56 and the supervisor saw
+# nothing). PROBE_TIMEOUT is that deadline; the probe is killed, the model is
+# counted dead, rotation moves on.
+probe_guard() { # $1=pid $2=seconds
+  local pid="$1" window="$2" tick=0
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    tick=$((tick + 1))
+    [ "$tick" -lt "$window" ] && continue
+    kill -TERM "$pid" 2>/dev/null
+    sleep 3
+    kill -9 "$pid" 2>/dev/null
+    return 0
+  done
+}
+
 check_pair() { # $1=acct_dir $2=model_id -> prints answer, rc=0 if alive
-  local out
+  local out tmp pid gp rc
   # --standalone: a private server per run instead of the shared background
   # service. The shared one keeps a fixed port (49374); a stale instance, or
   # two probes at once, makes every model look dead with "port already in use"
   # — and the service also shells out to `ps`, which sandboxed hosts deny.
-  out=$(run_isolated "$1" run --standalone -m "$2" "Reply with exactly: ok" 2>&1)
-  local rc=$?
+  tmp="$(mktemp "${TMPDIR:-/tmp}/oc-probe.XXXXXX")" || tmp=/dev/null
+  run_isolated "$1" run --standalone -m "$2" "Reply with exactly: ok" >"$tmp" 2>&1 &
+  pid=$!
+  probe_guard "$pid" "$PROBE_TIMEOUT" &
+  gp=$!
+  wait "$pid"; rc=$?
+  kill "$gp" 2>/dev/null; wait "$gp" 2>/dev/null
+  out="$(cat "$tmp" 2>/dev/null)"
+  rm -f "$tmp"
   printf '%s' "$out"
   [ $rc -eq 0 ] || return 1
   printf '%s' "$out" | grep -Eq "$DEAD_PATTERNS" && return 1
@@ -363,6 +427,20 @@ if [ "$INTERACTIVE" = 1 ]; then
   run_isolated "$D" -m "$MODEL"
   exit $?
 fi
-log "run: model=$MODEL account=$ACCOUNT prompt=$(printf '%s' "$PROMPT" | head -c 80)"
-run_isolated "$D" run --standalone -m "$MODEL" "$PROMPT"
+log "run: model=$MODEL account=$ACCOUNT stall=${STALL_WINDOW}s prompt=$(printf '%s' "$PROMPT" | head -c 80)"
+OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/oc-run.XXXXXX")" || OUT_FILE=/dev/null
+run_isolated "$D" run --standalone -m "$MODEL" "$PROMPT" >"$OUT_FILE" 2>&1 &
+RUN_PID=$!
+stall_guard "$RUN_PID" "$D/data" "$OUT_FILE" &
+GUARD_PID=$!
+wait "$RUN_PID"
+RC=$?
+kill "$GUARD_PID" 2>/dev/null; wait "$GUARD_PID" 2>/dev/null
+cat "$OUT_FILE"
+rm -f "$OUT_FILE"
+if [ $RC -eq 143 ] || [ $RC -eq 137 ]; then
+  log "run killed after ${STALL_WINDOW}s of silence — model is mute"
+  echo "opencode-rotate: stalled ${STALL_WINDOW}s" >&2
+fi
+exit $RC
 

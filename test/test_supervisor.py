@@ -1,10 +1,37 @@
 """The recovery loop: what happens after each kind of stop."""
-import os, sys, unittest
+import os, sys, unittest, json, time, subprocess, tempfile, io
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.path.insert(0, os.path.join(ROOT, ".agents", "skills", "_shared"))
 import config, dispatcher, journal as J, meta as M, supervisor as S
 from outcome import Outcome
+
+
+def _git_repo():
+    """A clean, committed git repo in a temp dir, or None if git is absent."""
+    if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
+        return None
+    d = tempfile.mkdtemp()
+    try:
+        subprocess.run(["git", "init", "-q", d], check=True)
+        subprocess.run(["git", "-C", d, "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", d, "config", "user.name", "t"], check=True)
+        with open(os.path.join(d, "seed.txt"), "w") as f:
+            f.write("seed\n")
+        subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", d, "commit", "-qm", "init"], check=True)
+    except Exception:
+        return None
+    return d
+
+
+def _new_supervisor(root, seq):
+    j = J.Journal(root, CFG); j.reset()
+    f = Fake(seq)
+    m = M.Meta(root, CFG, {"fake": f}); m.model = None
+    sv = S.Supervisor(root, CFG, {"fake": f}, m, j, verbose=False)
+    sv.worker_order = ["fake"]
+    return sv, f, j
 
 CFG = {
     "meta": {"candidates": [], "timeout_sec": 30, "max_reparse": 0},
@@ -80,6 +107,131 @@ class TestNoInfiniteLoop(unittest.TestCase):
         # Pathological: the skill never recovers. Must still return.
         self.assertIn(run_step(["retry"])[0], ("ok", "exhausted", "fatal",
                                                "loop_guard"))
+
+
+class RepoEditingFake(Fake):
+    """A worker that actually touches the target repo before reporting ok —
+    i.e. it did the work the evidence check is looking for."""
+
+    def __init__(self, seq, repo):
+        super().__init__(seq)
+        self.repo = repo
+
+    def run(self, prompt, model=None, account=None, timeout=None):
+        with open(os.path.join(self.repo, "seed.txt"), "a") as fh:
+            fh.write("edited by worker\n")
+        return super().run(prompt, model=model, account=account, timeout=timeout)
+
+
+class TestEvidence(unittest.TestCase):
+    """A file step that reports ok but leaves the target repo unchanged is a
+    false positive — a weak model that returned rc=0 having done nothing."""
+
+    def test_ok_with_unchanged_repo_is_needs_review(self):
+        repo = _git_repo()
+        if repo is None:
+            self.skipTest("git not available")
+        root = tempfile.mkdtemp()
+        sv, f, j = _new_supervisor(root, ["ok"])
+        # trailing slash so _target_dir_from_task recognises the absolute dir
+        # on platforms whose path regex requires it; names a real git repo so
+        # the evidence check has a fingerprint to compare against.
+        body = "edit %s/ and commit" % repo
+        t = dispatcher.Task(os.path.join(root, "t.md"), "t", body, 1)
+        res = sv.run_step(t, 1, "prompt")
+        self.assertEqual(res, "needs_review")
+        self.assertTrue(sv._no_evidence)
+
+    def test_ok_with_changed_repo_is_ok(self):
+        repo = _git_repo()
+        if repo is None:
+            self.skipTest("git not available")
+        root = tempfile.mkdtemp()
+        j = J.Journal(root, CFG); j.reset()
+        f = RepoEditingFake(["ok"], repo)
+        m = M.Meta(root, CFG, {"fake": f}); m.model = None
+        sv = S.Supervisor(root, CFG, {"fake": f}, m, j, verbose=False)
+        sv.worker_order = ["fake"]
+        body = "edit %s/ and commit" % repo
+        t = dispatcher.Task(os.path.join(root, "t.md"), "t", body, 1)
+        res = sv.run_step(t, 1, "prompt")
+        self.assertEqual(res, "ok")
+        self.assertFalse(sv._no_evidence)
+
+
+class TestStatus(unittest.TestCase):
+    """status.json is the single file an outside observer reads; it must fold
+    the worker heartbeat and never raise."""
+
+    def test_write_merges_keys(self):
+        d = tempfile.mkdtemp()
+        st = S._Status(d)
+        st.write(100.0, state="running", task="t", worker="fake")
+        with open(st.path) as fh:
+            cur = json.load(fh)
+        self.assertEqual(cur["state"], "running")
+        self.assertEqual(cur["task"], "t")
+        self.assertEqual(cur["worker"], "fake")
+        self.assertEqual(cur["last_activity"], 100.0)
+        # a second write merges, not clobbers
+        st.write(101.0, worker="cline")
+        with open(st.path) as fh:
+            cur = json.load(fh)
+        self.assertEqual(cur["state"], "running")   # kept from before
+        self.assertEqual(cur["worker"], "cline")    # updated
+        self.assertEqual(cur["last_activity"], 101.0)
+
+    def test_fold_and_clear_heartbeat(self):
+        d = tempfile.mkdtemp()
+        st = S._Status(d)
+        hb = os.path.join(d, "worker_heartbeat.json")
+        with open(hb, "w") as fh:
+            json.dump({"last_active": 555.0}, fh)
+        st.write(100.0, state="running")
+        la = st.fold_and_clear_heartbeat(100.0)
+        self.assertEqual(la, 555.0)                 # heartbeat wins
+        self.assertFalse(os.path.exists(hb))         # beacon removed
+        with open(st.path) as fh:
+            cur = json.load(fh)
+        self.assertEqual(cur["last_activity"], 555.0)
+
+
+class TestDurability(unittest.TestCase):
+    """Pick up after a run that died mid-step: a frozen status.json and a
+    stale heartbeat beacon left by a corpse must not fool a fresh run."""
+
+    def _events(self, root):
+        p = os.path.join(root, CFG["state"]["dir"], "events.jsonl")
+        if not os.path.exists(p):
+            return []
+        out = []
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        out.append(json.loads(line))
+                    except Exception:
+                        pass
+        return out
+
+    def test_recover_removes_heartbeat_and_logs_event(self):
+        root = tempfile.mkdtemp()
+        sv, f, j = _new_supervisor(root, ["ok"])
+        sd = sv.status_dir
+        os.makedirs(sd, exist_ok=True)
+        with open(os.path.join(sd, "worker_heartbeat.json"), "w") as fh:
+            json.dump({"last_active": time.time()}, fh)
+        with open(os.path.join(sd, "status.json"), "w") as fh:
+            json.dump({"state": "running", "run_pid": 999999,
+                       "current_step": 3, "task": "t"}, fh)
+        sv._recover_if_crashed("t")
+        self.assertFalse(
+            os.path.exists(os.path.join(sd, "worker_heartbeat.json")),
+            "stale heartbeat from a dead run must be removed")
+        self.assertTrue(
+            any(e.get("type") == "recover" for e in self._events(root)),
+            "a frozen 'running' status must log a recover event")
 
 
 if __name__ == "__main__":

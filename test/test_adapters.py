@@ -16,6 +16,50 @@ sys.path.insert(0, os.path.join(ROOT, ".agents", "skills", "_shared"))
 
 import nvidia as nvidia_mod            # noqa: E402
 import tokenharbor as th_mod           # noqa: E402
+import base as base_mod                 # noqa: E402
+from outcome import Outcome             # noqa: E402
+
+
+def _o(http, detail):
+    return Outcome("retry", "stub", "m", "a", detail, http, 100, detail)
+
+
+class TestIsRateLimit(unittest.TestCase):
+    """Plan #4 — a provider throttle is transient, not a model fault.
+
+    429/520/529 and explicit rate-limit/quota prose must score as a ratelimit
+    so the adapter records a brief 'limit' cooldown; plain 5xx (500/502/503)
+    must stay ordinary failures so a genuinely broken model still hits the
+    hard-failure breaker.
+    """
+    def test_http_429(self):
+        self.assertTrue(base_mod.Adapter._is_ratelimit(_o(429, "")))
+    def test_http_520(self):
+        self.assertTrue(base_mod.Adapter._is_ratelimit(_o(520, "")))
+    def test_http_529(self):
+        self.assertTrue(base_mod.Adapter._is_ratelimit(_o(529, "")))
+
+    def test_prose_rate_limit(self):
+        self.assertTrue(base_mod.Adapter._is_ratelimit(
+            _o(None, "you have hit a rate limit")))
+    def test_prose_ratelimit(self):
+        self.assertTrue(base_mod.Adapter._is_ratelimit(_o(None, "RATELIMIT reached")))
+    def test_prose_quota_exceeded(self):
+        self.assertTrue(base_mod.Adapter._is_ratelimit(
+            _o(None, "quota exceeded for today")))
+    def test_prose_too_many_requests(self):
+        self.assertTrue(base_mod.Adapter._is_ratelimit(
+            _o(None, "429 too many requests")))
+
+    def test_http_500_not_ratelimit(self):
+        self.assertFalse(base_mod.Adapter._is_ratelimit(_o(500, "")))
+    def test_http_502_not_ratelimit(self):
+        self.assertFalse(base_mod.Adapter._is_ratelimit(_o(502, "")))
+    def test_http_503_not_ratelimit(self):
+        self.assertFalse(base_mod.Adapter._is_ratelimit(_o(503, "")))
+    def test_plain_error_text_not_ratelimit(self):
+        self.assertFalse(base_mod.Adapter._is_ratelimit(
+            _o(None, "internal server error")))
 
 
 def patched(mod, rc, out, err=""):

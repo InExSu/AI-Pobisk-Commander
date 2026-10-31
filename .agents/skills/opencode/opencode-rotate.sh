@@ -143,6 +143,30 @@ STALL_CHECK="${OC_STALL_CHECK:-30}"
 
 mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
 
+# CPU ticks (utime+stime) a process has burned, straight from /proc. 0 if
+# unknown. `ps` is unavailable in some sandboxes, so read /proc directly. A
+# worker running a long test suite burns CPU while writing nothing to its data
+# dir — that is the activity the file mtime alone misses, and the one that used
+# to get productive workers killed for "silence".
+cpu_of() {
+  local s
+  s="$(cut -d' ' -f14,15 "/proc/$1/stat" 2>/dev/null)"
+  [ -z "$s" ] && { echo 0; return; }
+  set -- $s
+  echo $(( ${1:-0} + ${2:-0} ))
+}
+
+# Liveness beacon for an outside observer (see cline-rotate.sh for the why).
+# No-op when PB_STATUS_DIR is unset (backward compatible).
+_heartbeat() { # $1=pid $2=model $3=state
+  [ -z "${PB_STATUS_DIR:-}" ] && return 0
+  local hb="$PB_STATUS_DIR/worker_heartbeat.json" now
+  now="$(date +%s)"
+  printf '{"pid":%s,"model":"%s","state":"%s","last_active":%s}\n' \
+    "$1" "$2" "$3" "$now" >"$hb.tmp" 2>/dev/null \
+    && mv -f "$hb.tmp" "$hb" 2>/dev/null
+}
+
 newest_under() { # $1=dir -> mtime of the most recently written file inside
   local newest=0 f m
   while IFS= read -r f; do
@@ -152,8 +176,15 @@ newest_under() { # $1=dir -> mtime of the most recently written file inside
   echo "$newest"
 }
 
+# Watch one run: every STALL_CHECK seconds look at the newest file under the
+# isolated data dir, the captured output, OR the worker's CPU ticks. The model
+# is mute only when ALL of these have been flat for STALL_WINDOW seconds; a
+# worker that is merely quiet on disk (running a long test suite) but burning
+# CPU is left alone.
 stall_guard() { # $1=pid $2=data_dir $3=out_file
-  local pid="$1" data="$2" out="$3" m mo now tick=0
+  local pid="$1" data="$2" out="$3" m mo now tick=0 last_cpu last_m=0 last_active cur_cpu
+  last_active="$(date +%s)"
+  last_cpu="$(cpu_of "$pid")"
   while kill -0 "$pid" 2>/dev/null; do
     sleep 1
     tick=$((tick + 1))
@@ -161,12 +192,23 @@ stall_guard() { # $1=pid $2=data_dir $3=out_file
     tick=0
     m="$(newest_under "$data")"
     [ -f "$out" ] && { mo="$(mtime_of "$out")"; [ "$mo" -gt "$m" ] && m="$mo"; }
+    cur_cpu="$(cpu_of "$pid")"
+    # Activity = the worker wrote OR burned CPU this interval. Either means it
+    # is alive; only when both are flat for STALL_WINDOW do we kill it.
+    if [ "$m" -gt "$last_m" ] || [ "$cur_cpu" -gt "$last_cpu" ]; then
+      last_active="$(date +%s)"
+      last_m="$m"
+      last_cpu="$cur_cpu"
+      _heartbeat "$pid" "$MODEL" "active"
+      continue
+    fi
     now="$(date +%s)"
-    if [ $((now - m)) -ge "$STALL_WINDOW" ]; then
-      log "stall ${STALL_WINDOW}s without activity -> kill $pid"
+    if [ $((now - last_active)) -ge "$STALL_WINDOW" ]; then
+      log "stall ${STALL_WINDOW}s without activity (files + CPU) -> kill $pid"
       kill -TERM "$pid" 2>/dev/null
       sleep 5
       kill -9 "$pid" 2>/dev/null
+      _heartbeat "$pid" "$MODEL" "stalled"
       return 0
     fi
   done
@@ -179,6 +221,7 @@ stall_guard() { # $1=pid $2=data_dir $3=out_file
 # counted dead, rotation moves on.
 probe_guard() { # $1=pid $2=seconds
   local pid="$1" window="$2" tick=0
+  _heartbeat "$pid" "${MODEL:-}" "probing"
   while kill -0 "$pid" 2>/dev/null; do
     sleep 1
     tick=$((tick + 1))
@@ -431,6 +474,7 @@ log "run: model=$MODEL account=$ACCOUNT stall=${STALL_WINDOW}s prompt=$(printf '
 OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/oc-run.XXXXXX")" || OUT_FILE=/dev/null
 run_isolated "$D" run --standalone -m "$MODEL" "$PROMPT" >"$OUT_FILE" 2>&1 &
 RUN_PID=$!
+_heartbeat "$RUN_PID" "$MODEL" "running"
 stall_guard "$RUN_PID" "$D/data" "$OUT_FILE" &
 GUARD_PID=$!
 wait "$RUN_PID"

@@ -25,6 +25,16 @@ import journal as J                              # noqa: E402
 import meta as M                                 # noqa: E402
 import supervisor as S                           # noqa: E402
 
+# Capture the genuine defaults once, before any test mutates `classify`'s
+# process-global no-filesystem config. `Supervisor.__init__` calls
+# `set_no_filesystem` from the config it is given, so every `eligible()` call
+# below leaves the global set to whatever that config named — `TestFileStep-
+# Detection`/`TestRoutingGuards` build Supervisors with no_filesystem=api. The
+# per-class tearDown must restore the DEFAULTS, not the pre-test (already
+# polluted) value, or a later file (`test_classify`) sees the wrong skill set.
+_NO_FS_DEFAULT_SKILLS = set(classify._NO_FS_SKILLS)
+_NO_FS_DEFAULT_PATTERNS = classify._NO_FS_PATTERNS
+
 CFG = {
     "meta": {"candidates": [], "timeout_sec": 30, "max_reparse": 0},
     "budget": {"max_retries_per_step": 3, "max_model_rotations": 10,
@@ -169,12 +179,29 @@ class TestRoutingGuards(unittest.TestCase):
 
 class TestConfiguredPatternsAreLive(unittest.TestCase):
     def setUp(self):
+        # Record the value we are about to change so the restore is exact for
+        # whatever this single test configured — but the module-level defaults
+        # are what protect every test that runs afterwards.
         self._skills = set(classify._NO_FS_SKILLS)
         self._patterns = classify._NO_FS_PATTERNS
 
     def tearDown(self):
-        classify._NO_FS_SKILLS = self._skills
-        classify._NO_FS_PATTERNS = self._patterns
+        # Restore the genuine defaults so a later test file (test_classify) is
+        # not polluted by the configs exercised above.
+        classify._NO_FS_SKILLS = set(_NO_FS_DEFAULT_SKILLS)
+        classify._NO_FS_PATTERNS = _NO_FS_DEFAULT_PATTERNS
+
+
+def tearDownModule():
+    # unittest orders test CLASSES alphabetically, not by definition order, so
+    # TestFileStepDetection / TestRoutingGuards (which call eligible() -> build a
+    # Supervisor -> set_no_filesystem from their config) run AFTER
+    # TestConfiguredPatternsAreLive and leave classify's process-global
+    # no-filesystem config pointing at whatever their CFG named. Reset the
+    # genuine defaults once, after every test in this module, so the next file
+    # (test_classify) starts clean.
+    classify._NO_FS_SKILLS = set(_NO_FS_DEFAULT_SKILLS)
+    classify._NO_FS_PATTERNS = _NO_FS_DEFAULT_PATTERNS
 
     def test_config_patterns_are_applied(self):
         classify.set_no_filesystem(["api"], [r"cannot touch the disk"])

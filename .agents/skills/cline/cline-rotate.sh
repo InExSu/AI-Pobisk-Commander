@@ -290,14 +290,43 @@ newest_session_file() {
 
 mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
 
-# Watch one run: every STALL_CHECK seconds take the newest sign of life —
-# the session file cline writes while it thinks, or the captured output.
-# Nothing moved for STALL_WINDOW -> the model is mute, kill the call.
-# The output file counts on purpose: a worker that never even started a
-# session (hung before the first token) must also be caught.
+# CPU ticks (utime+stime) a process has burned, straight from /proc. 0 if
+# unknown. `ps` is unavailable in some sandboxes, so read /proc directly. A
+# worker that is genuinely thinking — compiling, running phpunit/node, waiting
+# on a slow tool — keeps advancing its tick count even when it writes nothing to
+# disk. That is the signal the file mtime alone misses, and the one that used to
+# get productive workers killed for "silence".
+cpu_of() {
+	local s
+	s="$(cut -d' ' -f14,15 "/proc/$1/stat" 2>/dev/null)"
+	[[ -z "$s" ]] && { echo 0; return; }
+	set -- $s
+	echo $(( ${1:-0} + ${2:-0} ))
+}
+
+# Lightweight liveness beacon for an outside observer (the supervisor, or a
+# human asking "is it alive?"): written on every sign of life so a single read
+# of PB_STATUS_DIR/worker_heartbeat.json answers the question without process
+# archaeology. No-op when PB_STATUS_DIR is unset (backward compatible).
+_heartbeat() {  # $1=pid $2=model $3=state
+	[[ -z "${PB_STATUS_DIR:-}" ]] && return 0
+	local hb="$PB_STATUS_DIR/worker_heartbeat.json" now
+	now="$(date +%s)"
+	printf '{"pid":%s,"model":"%s","state":"%s","last_active":%s}\n' \
+		"$1" "$2" "$3" "$now" >"$hb.tmp" 2>/dev/null \
+		&& mv -f "$hb.tmp" "$hb" 2>/dev/null
+}
+
+# Watch one run: every STALL_CHECK seconds take the newest sign of life — the
+# session file cline writes while it thinks, the captured output, OR the
+# worker's CPU ticks. The model is mute only when ALL of these have been flat
+# for STALL_WINDOW seconds; a worker that is merely quiet on disk (running a
+# long test suite) but burning CPU is left alone.
 stall_guard() {
 	local pid="$1" sess="$2" out="$3"
-	local now m mo f tick=0
+	local now m mo f tick=0 last_cpu last_m=0 last_active cur_cpu
+	last_active="$(date +%s)"
+	last_cpu="$(cpu_of "$pid")"
 	while kill -0 "$pid" 2>/dev/null; do
 		# Sleep in one-second slices: a guard blocked in a single long sleep
 		# cannot be stopped when the run ends normally, and every normal run
@@ -310,12 +339,24 @@ stall_guard() {
 		f="$(newest_session_file "$sess")"
 		[[ -n "$f" ]] && m="$(mtime_of "$f")"
 		[[ -f "$out" ]] && { mo="$(mtime_of "$out")"; (( mo > m )) && m="$mo"; }
+		cur_cpu="$(cpu_of "$pid")"
+		# Activity = the worker wrote OR burned CPU this interval. Either one
+		# means it is alive; only when both are flat for STALL_WINDOW do we
+		# conclude it is mute and kill it.
+		if (( m > last_m )) || (( cur_cpu > last_cpu )); then
+			last_active="$(date +%s)"
+			last_m="$m"
+			last_cpu="$cur_cpu"
+			_heartbeat "$pid" "$model" "active"
+			continue
+		fi
 		now="$(date +%s)"
-		if (( now - m >= STALL_WINDOW )); then
-			clog "  stall  ${STALL_WINDOW}s без движения сессии ($f) -> kill $pid"
+		if (( now - last_active >= STALL_WINDOW )); then
+			clog "  stall  ${STALL_WINDOW}s без движения (файлы и CPU) ($f) -> kill $pid"
 			kill -TERM "$pid" 2>/dev/null
 			sleep 5
 			kill -9 "$pid" 2>/dev/null
+			_heartbeat "$pid" "$model" "stalled"
 			return 0
 		fi
 	done
@@ -493,6 +534,7 @@ while true; do
 	RUN_OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/cline-run.XXXXXX")" || RUN_OUT_FILE=/dev/null
 	"$CLINE_BIN" "${local_args[@]}" "$PROMPT" >"$RUN_OUT_FILE" 2>&1 &
 	RUN_PID=$!
+	_heartbeat "$RUN_PID" "$model" "running"
 	stall_guard "$RUN_PID" "$ACCOUNT_DIR" "$RUN_OUT_FILE" &
 	GUARD_PID=$!
 	wait "$RUN_PID"

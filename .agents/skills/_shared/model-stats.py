@@ -22,7 +22,7 @@ Shape:
           "stability":0..100,
           "fails":    n,                  # consecutive failures
           "cooldown_until": epoch|0,      # circuit breaker
-          "state":    healthy|down|recovering|auth_error|unknown,
+          "state":    healthy|down|recovering|auth_error|ratelimit|unknown,
           "last_ok":  epoch,
           "last_err": "text",
           "updated":  epoch
@@ -68,6 +68,11 @@ MAX_SAMPLES = 20            # rolling window of latency samples
 COOLDOWN_FAILS = 3          # consecutive failures before the breaker opens
 COOLDOWN_SEC = 900          # 15 min: shorter than a daily quota reset, long
                             # enough to stop burning the rotation every loop
+# Transient upstream throttle (HTTP 429/520/529, "rate limit", "quota"). The
+# model is healthy; the provider is merely rate-limiting. A 15-minute breaker
+# is far too long for that — it would sit out an entire run. Park it briefly so
+# the fleet routes around a flaky provider for a few minutes, then try again.
+RATELIMIT_SEC = 600         # 10 min: a rate-limit window usually clears sooner
 AUTH_PARK_SEC = 86400      # 24h: how long a bad-credential model stays
                             # parked. Finite on purpose — a permanent park
                             # made rotation collapse to one model unnoticed.
@@ -217,7 +222,6 @@ def cmd_record(argv):
             e["samples"] = (e.get("samples") or [])[-MAX_SAMPLES:] + [latency]
     else:
         total += 1
-        e["fails"] = (e.get("fails") or 0) + 1
         e["last_err"] = (err or verdict)[:200]
         if verdict == "auth":
             # Bad credentials do not heal by retrying, so they are parked
@@ -229,11 +233,20 @@ def cmd_record(argv):
             e["state"] = "auth_error"
             e["cooldown_until"] = now + AUTH_PARK_SEC
             e["parks"] = (e.get("parks") or 0) + 1
-        elif e["fails"] >= COOLDOWN_FAILS:
-            e["state"] = "down"
-            e["cooldown_until"] = now + COOLDOWN_SEC
+        elif verdict == "limit":
+            # Transient upstream throttle (429/520/529, "rate limit",
+            # "quota"). The model is fine, the provider is merely limiting;
+            # route around it for a few minutes instead of hammering it or
+            # counting it toward the hard-failure breaker.
+            e["state"] = "ratelimit"
+            e["cooldown_until"] = now + RATELIMIT_SEC
         else:
-            e["state"] = "recovering"
+            e["fails"] = (e.get("fails") or 0) + 1
+            if e["fails"] >= COOLDOWN_FAILS:
+                e["state"] = "down"
+                e["cooldown_until"] = now + COOLDOWN_SEC
+            else:
+                e["state"] = "recovering"
 
     e["uptime"] = [ok, total]
     e["updated"] = now
@@ -305,10 +318,10 @@ def cmd_order(argv):
             if (e.get("parks") or 0) >= AUTH_MAX_PARKS:
                 continue
             e["state"] = "recovering"
-        if e.get("state") == "down" and cd > now:
+        if e.get("state") in ("down", "ratelimit") and cd > now:
             cooling.append((cd, rank, m))  # retried only after cooldown
             continue
-        if e.get("state") == "down" and cd <= now:
+        if e.get("state") in ("down", "ratelimit") and cd <= now:
             e["state"] = "recovering"     # prober: one cheap retry allowed
         # Only a model that has actually answered belongs in the ranked bucket.
         # A model with zero successes (e.g. 0/3 probes, or one still recovering)

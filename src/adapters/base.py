@@ -66,12 +66,20 @@ class Adapter:
                      model=model or "", account=account or "", elapsed_ms=ms)
 
         # rc != 0 with no recognised error pattern is a real failure, not a
-        # success: the skill gave up but we could not say why.
+        # success: the skill gave up but we could not say why. A stall-guard or
+        # timeout kill leaves the worker's own "stalled"/"timeout" marker in the
+        # output — name it, so the journal shows the model was killed for
+        # silence rather than "exited with no recognised error".
         if rc not in (0,) and o.outcome == "ok":
             from outcome import Outcome, RETRY
+            reason = "exit %d with no recognised error" % rc
+            low = (text or "").lower()
+            if "stalled" in low:
+                reason = "worker killed by stall guard (silent, rc %d)" % rc
+            elif "timeout" in low or "timed out" in low:
+                reason = "worker killed by timeout (rc %d)" % rc
             o = Outcome(RETRY, self.skill, model or "", account or "",
-                        "exit %d with no recognised error" % rc,
-                        None, ms, text)
+                        reason, None, ms, text)
         self._record(o)
         return o
 
@@ -88,16 +96,35 @@ class Adapter:
         """
         try:
             import sys
+            import importlib.util as _ilu
             _shared = os.path.join(self.repo_root, ".agents", "skills", "_shared")
             if _shared not in sys.path:
                 sys.path.insert(0, _shared)
-            import model_stats
+            try:
+                import model_stats   # only if a model_stats.py shim exists
+            except Exception:
+                # The store ships as model-stats.py (hyphen), which a plain
+                # `import model_stats` cannot resolve. Load it by path so the
+                # adapter-side health recording actually runs instead of
+                # silently no-op'ing inside this try/except. No shell script
+                # writes the store today, so this is its only live writer.
+                _spec = _ilu.spec_from_file_location(
+                    "model_stats",
+                    os.path.join(_shared, "model-stats.py"))
+                model_stats = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(model_stats)
 
             verdict = "fail"
             if o.outcome == "ok":
                 verdict = "ok"
             elif o.outcome == "rotate_account" and self._is_credential_failure(o):
                 verdict = "auth"
+            elif self._is_ratelimit(o):
+                # 429/520/529 / "rate limit" / "quota": the provider is
+                # throttling, not the model or the account. Park it briefly
+                # (model-stats "ratelimit" state) so the fleet routes around
+                # a flaky provider instead of hammering it every loop.
+                verdict = "limit"
 
             # Never park a model we could not even name — that writes junk
             # entries like skill:"unknown" into the store.
@@ -118,6 +145,24 @@ class Adapter:
         for s in ("credential rejected", "auth error", "invalid api key",
                   "unauthorized", "unauthenticated", "no authtoken",
                   "no api key", "missing api key", "not authenticated"):
+            if s in d:
+                return True
+        return False
+
+    @staticmethod
+    def _is_ratelimit(o):
+        """True when the provider is throttling (transient, not a model fault).
+
+        Narrow on purpose: 429/520/529 are unambiguous throttle codes, and the
+        prose patterns name rate-limit/quota explicitly. Plain 5xx (500/502/503)
+        are left as ordinary failures so a genuinely broken model still lands in
+        the hard-failure breaker instead of being coddled forever.
+        """
+        if o.http in (429, 520, 529):
+            return True
+        d = (o.detail or "").lower()
+        for s in ("rate limit", "ratelimit", "quota exceeded",
+                  "too many requests", "429", "520", "529"):
             if s in d:
                 return True
         return False

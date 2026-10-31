@@ -24,6 +24,7 @@ is deterministic — cheap and predictable.
 import os
 import sys
 import time
+import json
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -101,6 +102,103 @@ def _reconcile_task_state(journal, task):
     return st
 
 
+def _target_repo_dir(task, cfg):
+    """Directory the worker will actually edit — where evidence lives.
+
+    Mirrors `_with_cwd`: the graft repo wins, else the absolute path named in
+    the task body, else None. A None result means "no git repo to watch", and a
+    file step there is never falsely flagged for lacking evidence.
+    """
+    g = (cfg.get("graft") or {}) if cfg else {}
+    if g.get("repo"):
+        return g["repo"]
+    return _target_dir_from_task(task) or None
+
+
+def _repo_snapshot(repo_dir):
+    """Fingerprint of a git repo: HEAD plus full working-tree status.
+
+    Returns None when the path is not a git repo, so a non-git target is never
+    falsely flagged. Any real work — a commit, an edit, or a new untracked file
+    — changes this string.
+    """
+    if not repo_dir or not os.path.isdir(repo_dir):
+        return None
+    import subprocess as _sp
+    try:
+        head = _sp.run(["git", "-C", repo_dir, "rev-parse", "HEAD"],
+                      capture_output=True, text=True, timeout=20)
+        if head.returncode != 0:
+            return None
+        st = _sp.run(["git", "-C", repo_dir, "status", "--porcelain", "-uall"],
+                    capture_output=True, text=True, timeout=20)
+        return "%s|%s" % (head.stdout.strip(), st.stdout)
+    except Exception:
+        return None
+
+
+class _Status:
+    """Best-effort single-file run status for an outside observer.
+
+    One read of .ai_pobisk/status.json answers "is it alive / what is it
+    doing?" — no process archaeology. Callers pass only what changed; the rest
+    is merged over the previous content. Never raises: observability must not
+    be able to break a run.
+    """
+
+    def __init__(self, status_dir):
+        self.dir = status_dir
+        self.path = os.path.join(status_dir, "status.json")
+
+    def write(self, last_activity, **kw):
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+            cur = {}
+            if os.path.exists(self.path):
+                try:
+                    with open(self.path) as f:
+                        cur = json.load(f)
+                except Exception:
+                    cur = {}
+            cur.update(kw)
+            cur["last_activity"] = last_activity
+            cur["updated_at"] = time.time()
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cur, f, indent=2)
+            os.replace(tmp, self.path)
+        except Exception:
+            pass
+
+    def fold_and_clear_heartbeat(self, last_activity):
+        """Pull the worker's liveness beacon into last_activity, then remove it.
+
+        The rotate script writes PB_STATUS_DIR/worker_heartbeat.json on every
+        sign of life; folding its last_active gives the most precise "when did
+        anything happen" timestamp, and removing the file stops a stale beacon
+        from masking the next step's silence.
+        """
+        try:
+            hb = os.path.join(self.dir, "worker_heartbeat.json")
+            if os.path.exists(hb):
+                try:
+                    with open(hb) as f:
+                        d = json.load(f)
+                    la = d.get("last_active")
+                    if isinstance(la, (int, float)) and la > last_activity:
+                        last_activity = la
+                except Exception:
+                    pass
+                try:
+                    os.remove(hb)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.write(last_activity)
+        return last_activity
+
+
 class Supervisor:
     def __init__(self, repo_root, cfg, adapters, meta, journal, verbose=True):
         self.repo_root = repo_root
@@ -115,6 +213,13 @@ class Supervisor:
         self._tried = {}      # skill -> set of model ids already attempted
         self._graft_ctx = None   # lazy: import graftctx only when enabled
         self._ctx_cache = {}     # task name -> context block ("" = none)
+        self._no_evidence = False  # a file step reported ok but changed nothing
+        self._status_last_activity = time.time()
+        self.status_dir = os.path.join(self.repo_root, ".ai_pobisk")
+        self.status = _Status(self.status_dir)
+        # Workers inherit this so they can write a liveness beacon the
+        # supervisor — and a human — can read without process archaeology.
+        os.environ["PB_STATUS_DIR"] = self.status_dir
         self._sync_no_filesystem()
 
     def _sync_no_filesystem(self):
@@ -145,6 +250,14 @@ class Supervisor:
             self.journal.mark(name, "dry-run")
             return "dry-run"
 
+        # Observability + durability: publish a status file an outside observer
+        # can read in one go, and warn if a previous run was left mid-step.
+        self._status_last_activity = time.time()
+        self._recover_if_crashed(name)
+        self.status.write(self._status_last_activity, state="running", task=name,
+                          run_pid=os.getpid(), started_at=time.time(),
+                          current_step=0, step_state="idle")
+
         started = time.time()
         wall = int(self.cfg["budget"]["max_wall_clock_sec"])
         max_steps = int(self.cfg["budget"]["max_steps_per_task"])
@@ -156,9 +269,15 @@ class Supervisor:
                 self.journal.mark(name, "failed", idx - 1,
                                   "wall clock budget spent (%ds)" % wall)
                 self._say("  ABORT: wall clock budget spent")
+                self.status.write(self._status_last_activity, state="failed",
+                                 finished_at=time.time(),
+                                 step_state="failed", reason="wall clock")
                 return "failed"
             if idx > max_steps:
                 self.journal.mark(name, "failed", idx - 1, "too many steps")
+                self.status.write(self._status_last_activity, state="failed",
+                                 finished_at=time.time(),
+                                 step_state="failed", reason="too many steps")
                 return "failed"
 
             res = self.run_step(task, idx, step)
@@ -167,6 +286,10 @@ class Supervisor:
                 continue
             self.journal.mark(name, "failed", idx - 1,
                               "step %d -> %s" % (idx, res))
+            self.status.write(self._status_last_activity, state="failed",
+                             finished_at=time.time(), step_state="failed",
+                             last_result=res,
+                             no_evidence=self._no_evidence)
             return res
 
         self.journal.mark(name, "done", len(task.steps()), "all steps done")
@@ -174,7 +297,55 @@ class Supervisor:
                            result="done",
                            wall_ms=int((time.time() - started) * 1000))
         self._say("  task %s: done" % name)
+        self.status.write(self._status_last_activity, state="done",
+                         finished_at=time.time(), step_state="done",
+                         no_evidence=self._no_evidence)
         return "done"
+
+    # ── durability: pick up after a run that died mid-step ─────────────────────
+    def _recover_if_crashed(self, name):
+        """Clean up the wreckage of a previous run that did not exit cleanly.
+
+        The journal is the source of truth for *which* step to resume from —
+        it records every completed step, so `run_task` simply skips them. But
+        a run that died mid-step also leaves a frozen `status.json`
+        (state=="running") and possibly a `worker_heartbeat.json` beacon. A
+        fresh supervisor must not read a heartbeat written by a corpse, and a
+        human reading status.json must not be told a dead run is alive.
+        """
+        try:
+            hb = os.path.join(self.status_dir, "worker_heartbeat.json")
+            if os.path.exists(hb):
+                try:
+                    os.remove(hb)
+                except Exception:
+                    pass
+
+            sp = os.path.join(self.status_dir, "status.json")
+            if not os.path.exists(sp):
+                return
+            try:
+                with open(sp) as f:
+                    cur = json.load(f)
+            except Exception:
+                return
+
+            if cur.get("state") == "running":
+                pid = cur.get("run_pid")
+                if isinstance(pid, int) and os.path.exists("/proc/%d" % pid):
+                    self._say("    WARN: status.json frozen on 'running' but "
+                              "pid %d is still alive — another supervisor?"
+                              % pid)
+                else:
+                    self.journal.event(
+                        "recover: previous run of %s left mid-step "
+                        "(status.json frozen on 'running')" % name,
+                        etype="recover", task=name,
+                        last_step=cur.get("current_step"))
+                    self._say("    recover: предыдущий запуск %s упал "
+                              "посреди шага %s" % (name, cur.get("current_step")))
+        except Exception:
+            pass
 
     # ── one step ──────────────────────────────────────────────────────────────
     def run_step(self, task, idx, step):
@@ -195,6 +366,18 @@ class Supervisor:
         # step that edits files must never be handed to one. The filtered list
         # is what this step walks.
         order = self._eligible_workers(task, step, idx)
+
+        # Evidence + observability setup for this step. A file step that
+        # reports ok but leaves the target repo unchanged is a false positive
+        # — a weak model that returned rc=0 having done nothing. Capture the
+        # repo fingerprint now so run_step can compare it after the step ends.
+        target_dir = _target_repo_dir(task, self.cfg)
+        is_file_step = self._requires_filesystem(task, step)
+        baseline = _repo_snapshot(target_dir) if is_file_step else None
+        self._status_last_activity = time.time()
+        self.status.write(self._status_last_activity, state="running",
+                         task=name, current_step=idx, step_state="running",
+                         worker="", step_started_at=time.time())
 
         budgets = {
             "max_retries": int(self.cfg["budget"]["max_retries_per_step"]),
@@ -247,6 +430,9 @@ class Supervisor:
 
             skill = order[worker_idx]
             a = self.adapters[skill]
+            # Publish which worker owns this attempt so an outside observer
+            # reading status.json sees the active hand, not just "running".
+            self.status.write(self._status_last_activity, worker=skill)
 
             self._say("  step %d: %s%s" % (idx, skill,
                                            " (%s)" % model if model else ""))
@@ -255,6 +441,11 @@ class Supervisor:
             o = a.run(prompt, model=model,
                       timeout=int(self.cfg["budget"].get("step_timeout_sec", 600)))
             self._pace(o)
+            # Fold the worker's liveness beacon (written by the rotate script
+            # on every sign of life) into last_activity, then drop the file so
+            # a stale beacon cannot mask the next attempt's silence.
+            self._status_last_activity = self.status.fold_and_clear_heartbeat(
+                self._status_last_activity)
             # Remember which model actually served the call, so a rotation has
             # a real starting point. Skills that pick internally report their
             # choice back in `model`; those that do not leave it empty, and
@@ -291,6 +482,29 @@ class Supervisor:
                 self._say("    invariant: %s" % d.reason)
 
             if d.terminal:
+                # Evidence check — a false positive the rules cannot see.
+                # A file step that reports ok but leaves the target repo
+                # byte-for-byte as it found it (HEAD and working tree
+                # unchanged) is a weak model that returned rc=0 having done
+                # no work. Do not let that count as success: flag it for a
+                # human and report non-success so the task does not claim a
+                # step it never actually performed. The check is skipped when
+                # baseline is None — a non-git target we cannot fingerprint
+                # is never falsely accused.
+                if (d.result == "ok" and is_file_step
+                        and baseline is not None):
+                    after = _repo_snapshot(target_dir)
+                    if after == baseline:
+                        self._no_evidence = True
+                        self.journal.event(
+                            "evidence: step %d reported ok but %s unchanged"
+                            % (idx, target_dir),
+                            etype="evidence", task=name, step=idx,
+                            skill=skill)
+                        self._say("    evidence: шаг %d вернул ok, но "
+                                  "репозиторий %s не изменился — нужна "
+                                  "проверка" % (idx, target_dir))
+                        return "needs_review"
                 self._say("    -> %s (%s)" % (d.state, d.reason))
                 return d.result
 

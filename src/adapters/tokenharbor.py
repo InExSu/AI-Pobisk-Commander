@@ -9,7 +9,7 @@ Only 4 free models, so rotation depth is thin — the supervisor should treat
 """
 
 from base import Adapter, run_cmd
-from outcome import Outcome, OK, FATAL, ROTATE_MODEL
+from outcome import Outcome, FATAL, ROTATE_MODEL
 
 
 class TokenHarborAdapter(Adapter):
@@ -36,8 +36,10 @@ class TokenHarborAdapter(Adapter):
         text = (out or "") + "\n" + (err or "")
 
         if rc == 0:
-            return Outcome(OK, self.skill, model or "", account or "",
-                           "done", None, ms, text)
+            # Same trap as NVIDIA: rc 0 with "I cannot access your files" is a
+            # capability gap, not a completed task. Let classify() decide.
+            return classify(text, skill=self.skill, model=model or "",
+                            account=account or "", elapsed_ms=ms)
         if rc == 2:
             return Outcome(FATAL, self.skill, model or "", account or "",
                            "no Token Harbor API key in the secret store",

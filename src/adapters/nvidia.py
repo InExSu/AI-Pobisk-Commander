@@ -9,7 +9,7 @@ supervisor should fall through to another skill.
 """
 
 from base import Adapter, run_cmd
-from outcome import Outcome, OK, FATAL, ROTATE_MODEL
+from outcome import Outcome, FATAL, ROTATE_MODEL
 
 
 class NvidiaAdapter(Adapter):
@@ -36,8 +36,12 @@ class NvidiaAdapter(Adapter):
         text = (out or "") + "\n" + (err or "")
 
         if rc == 0:
-            return Outcome(OK, self.skill, model or "", account or "",
-                           "done", None, ms, text)
+            # rc 0 is not proof of work: a bare completion asked to edit files
+            # answers "I don't have access to your filesystem" in polite prose
+            # and exits 0. classify() knows that shape and reports
+            # rotate_account; for a normal answer it returns ok.
+            return classify(text, skill=self.skill, model=model or "",
+                            account=account or "", elapsed_ms=ms)
         if rc == 2:
             return Outcome(FATAL, self.skill, model or "", account or "",
                            "no NVIDIA API key in the secret store", None, ms, text)

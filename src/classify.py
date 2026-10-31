@@ -70,13 +70,23 @@ COMPILED = [(re.compile(p, re.I), o, why) for p, o, why in RULES]
 
 # "No such file or directory" / rc 127 / "command not found": the skill's
 # binary or script could not be executed.
+#
+# `\b127\b` alone was a trap: a coding agent's 77-minute transcript contains
+# port numbers, line numbers and byte counts, so any stray 127 turned a real
+# model failure into "skill binary missing". A missing binary fails fast and
+# says so in a few lines, so the caller only applies this to short output —
+# and 127 now has to look like an exit code.
 _MISSING_BINARY = re.compile(
     r"No such file or directory"
     r"|command not found"
     r"|Permission denied"
     r"|not executable"
-    r"|\b127\b",
+    r"|(?:exit|status|code|rc)\s*[=:]?\s*127\b",
     re.I)
+
+# Longest output that can still be a "binary did not start" message. Anything
+# bigger is a transcript from a skill that ran, whatever else it says.
+MISSING_BINARY_MAX_CHARS = 2000
 
 # A bare chat-completion call (nvidia/tokenharbor) has no file tools. Asked to
 # read or edit files, it answers "I don't have access to your filesystem" in
@@ -164,8 +174,9 @@ def classify(text, http=None, skill="", model="", account="", elapsed_ms=0,
 
     # A missing binary / broken invocation. This never fixes itself by
     # retrying, and it fails in milliseconds — without this check the
-    # supervisor spins thousands of iterations per minute.
-    if _MISSING_BINARY.search(text):
+    # supervisor spins thousands of iterations per minute. Only short output
+    # counts: a long transcript means the skill did run.
+    if len(text or "") <= MISSING_BINARY_MAX_CHARS and _MISSING_BINARY.search(text):
         return Outcome(ROTATE_ACCOUNT, skill, model, account,
                        "skill binary missing or not executable",
                        http, elapsed_ms, text)

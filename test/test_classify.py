@@ -132,3 +132,53 @@ class TestNoFilesystemCapability(unittest.TestCase):
         # cline HAS file tools; if it says this it is context, not a gap.
         o = classify.classify("Я не имею доступа к файловой системе", skill="cline")
         self.assertEqual(o.outcome, "ok")
+
+
+class TestMissingBinaryIsNotAnyNumber(unittest.TestCase):
+    """`\\b127\\b` used to match a port number in a 77-minute transcript.
+
+    The run was then reported as "skill binary missing or not executable" —
+    after the agent had worked for an hour. A missing binary fails fast and
+    says so in a couple of lines.
+    """
+
+    def test_long_transcript_with_127_is_not_a_missing_binary(self):
+        transcript = ("reading games/M-P/N/notbell/game/src/main.js\n"
+                      "listening on port 49127\n"
+                      "127 files changed\n") * 200
+        o = classify.classify(transcript, skill="cline")
+        self.assertNotIn("binary missing", o.detail)
+
+    def test_short_command_not_found_is_a_missing_binary(self):
+        o = classify.classify("/bin/sh: cline: command not found", skill="cline")
+        self.assertEqual(o.outcome, "rotate_account")
+        self.assertIn("binary missing", o.detail)
+
+    def test_exit_code_127_counts(self):
+        o = classify.classify("cline exited with code 127", skill="cline")
+        self.assertIn("binary missing", o.detail)
+
+    def test_bare_127_in_a_short_line_does_not(self):
+        # No "exit"/"status"/"rc" context: just a number.
+        o = classify.classify("page 127 of the manual", skill="cline")
+        self.assertNotIn("binary missing", o.detail)
+
+
+class TestBareCompletionCannotDoFileWork(unittest.TestCase):
+    """nvidia/tokenharbor exit 0 with "I cannot access your files".
+
+    rc 0 is not proof of work — that reply used to be scored `ok` and the task
+    silently completed having done nothing.
+    """
+
+    def test_polite_refusal_is_a_capability_gap(self):
+        o = classify.classify(
+            "I don't have access to your filesystem, but here is how you could "
+            "implement it: first, open the file...", skill="nvidia")
+        self.assertEqual(o.outcome, "rotate_account")
+        self.assertIn("no file access", o.detail)
+
+    def test_a_real_answer_stays_ok(self):
+        o = classify.classify("Done: translated 42 strings in i18n.js",
+                              skill="nvidia")
+        self.assertEqual(o.outcome, "ok")

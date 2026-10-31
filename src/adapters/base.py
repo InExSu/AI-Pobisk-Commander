@@ -24,6 +24,12 @@ class Adapter:
     skill = ""
     # Path to the skill's rotate script, relative to the repo root.
     script = ""
+    # Can this skill touch files on disk? Local CLI agents run a real agent
+    # with file tools (read/grep/edit/shell), so yes. A bare chat-completion
+    # API has no tools at all — it answers in prose and never opens the repo —
+    # so it says no. The supervisor routes file work only to workers that
+    # can actually do it.
+    has_filesystem = True
 
     def __init__(self, repo_root):
         self.repo_root = repo_root

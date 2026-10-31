@@ -20,6 +20,7 @@ __pycache__/
 # ai_Pobisk runtime state (journal + resume state), per-machine
 .ai_pobisk/
 .ai_pobisk_test/
+.ai_pobisk_test_cap/
 .ignore
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
@@ -27,3 +28,12 @@ __pycache__/
 
 # Assistant session notes — per-machine working log, not project source.
 .workbuddy-ai/
+
+# Personal data for the registration agent: who we are, not what we run.
+# Start from configs/profile.example.toml.
+configs/profile.toml
+
+# The project's own interpreter and browser binaries (see requirements.txt).
+# Playwright lives here on purpose: nothing global, nothing to clean up.
+.venv/
+.playwright/

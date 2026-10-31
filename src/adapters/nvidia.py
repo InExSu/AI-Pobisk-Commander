@@ -15,6 +15,11 @@ from outcome import Outcome, FATAL, ROTATE_MODEL
 class NvidiaAdapter(Adapter):
     skill = "nvidia"
     script = ".agents/skills/nvidia/nvidia-rotate.sh"
+    # This skill is a bare chat completion: `nvidia-rotate.sh` posts the
+    # prompt to https://integrate.api.nvidia.com/v1/chat/completions and
+    # prints the answer. There is no agent, no tool loop and no filesystem
+    # behind it — it cannot read the repo, only talk about it.
+    has_filesystem = False
 
     def _invoke(self, prompt, model=None, account=None, timeout=None):
         argv = [self.script_path, "ask"]

@@ -15,6 +15,10 @@ from outcome import Outcome, FATAL, ROTATE_MODEL
 class TokenHarborAdapter(Adapter):
     skill = "tokenharbor"
     script = ".agents/skills/tokenharbor/tokenharbor-rotate.sh"
+    # Same shape as NVIDIA: `tokenharbor-rotate.sh` posts to
+    # https://tokenharbor.ai/v1/chat/completions. A completion call, not an
+    # agent — no tools, no filesystem.
+    has_filesystem = False
 
     def _invoke(self, prompt, model=None, account=None, timeout=None):
         argv = [self.script_path, "ask"]

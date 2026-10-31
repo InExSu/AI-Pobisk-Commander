@@ -14,6 +14,9 @@ Commands:
     report [--run ID]                         post-hoc breakdown of a run
     graft [build|ask] [--deep]                code-graph context layer
     drakon [--svg PATH] [check]               the control machine + silhouette
+    mail [--wait SEC] [--code]                read the registration mailbox
+    signup URL [--yes] [--dry-run]            an AI fills a registration form
+    login URL [--wait SEC]                    open a window for OAuth / 2FA
 """
 
 import argparse
@@ -501,6 +504,220 @@ def cmd_drakon(repo_root, args):
     return 0
 
 
+def cmd_mail(repo_root, args):
+    """What is in the registration mailbox, and is the code there yet.
+
+    `mail`                 last letters: subject, sender, code, confirmation link
+    `mail --wait 180`      block until a *new* letter with a code arrives
+    `mail --code`          print only the code (for scripts)
+    `mail --from x --days 2 --lines 5`
+    """
+    from mailbox import Mail, MailError
+
+    cfg, _ = config.load(repo_root)
+    conf = cfg["mail"]
+    if not conf.get("host") or not conf.get("user"):
+        print("mail: [mail] host/user are not configured in configs/ai_pobisk.toml")
+        return 2
+    sender = getattr(args, "sender", "") or ""
+    if not sender and getattr(args, "sub", "status") not in ("", "status"):
+        sender = args.sub
+    subject = getattr(args, "subject", "") or ""
+
+    try:
+        mail = Mail(conf).connect()
+    except MailError as e:
+        print("mail: %s" % e)
+        return 2
+
+    try:
+        if args.wait:
+            # Watermark first: an old letter must not pass for a fresh code.
+            since = mail.last_uid()
+            got = mail.wait_for_code(since_uid=since, timeout=args.wait,
+                                     sender=sender or None,
+                                     subject=subject or None)
+            if not got:
+                print("mail: no code within %ss" % args.wait)
+                return 3
+            msg, code = got
+            print("%s" % code if args.code else
+                  "%s | %s | code=%s" % (msg.date, msg.sender, code))
+            return 0
+
+        msgs = mail.messages(sender=sender or None, subject=subject or None,
+                             days=getattr(args, "days", 0) or None,
+                             limit=args.lines)
+        if not msgs:
+            print("mail: nothing found")
+            return 1
+        hosts = [getattr(args, "links", "")] if getattr(args, "links", "") else []
+        for msg in reversed(msgs):
+            code = msg.code()
+            if args.code:
+                if code:
+                    print(code)
+                continue
+            when = msg.date.strftime("%Y-%m-%d %H:%M") if msg.date else "?"
+            print("%s  %s" % (when, msg.subject[:70]))
+            print("   from: %s" % msg.sender[:70])
+            if code:
+                print("   code: %s" % code)
+            links = msg.links(hosts, limit=2)
+            for link in links:
+                print("   link: %s" % link[:110])
+            if args.raw:
+                print("   " + msg.body[:400].replace("\n", " "))
+        return 0
+    finally:
+        mail.close()
+
+
+def cmd_login(repo_root, args):
+    """Open a site in a real window so the owner can pass OAuth / 2FA.
+
+    Some sites have no password form at all — apinex.bond, for instance, offers
+    only "Continue with Google". An agent must not attempt that step: it is the
+    owner's identity, Google blocks automated browsers, and a wrong attempt
+    burns the account. So the agent opens a visible window, the human signs in,
+    and the persistent profile keeps the session for every later command.
+
+    Nothing is typed by the program here. It only waits and then reports.
+    """
+    import browser
+    import pageview
+
+    url = args.sub if str(getattr(args, "sub", "")).startswith("http") else ""
+    if not url and args.query:
+        url = args.query[0]
+    if not url:
+        print("usage: ./ai_Pobisk.sh login https://site/keys [--wait 300]")
+        return 2
+    if not browser.available():
+        print(browser.install_hint())
+        return 2
+
+    cfg, _ = config.load(repo_root)
+    site = url.split("//", 1)[-1].split("/")[0].lower().replace("www.", "")
+    driver = browser.PlaywrightDriver(
+        os.path.join(repo_root, cfg["state"]["dir"], "browser", site),
+        headless=False, channel="chrome")
+    driver.start()
+    driver.goto(url)
+    wait = float(args.wait or 300)
+    print("login: window open at %s" % driver.url())
+    print("login: sign in there (Google / OAuth / 2FA); waiting up to %.0fs" % wait)
+
+    # Paths that mean "still not authorized". Everything else counts as a
+    # session: an SPA that keeps /login after success does not exist, and a
+    # false positive here is harmless (the profile is kept either way).
+    loginish = ("/login", "/signin", "/sign-in", "/auth", "/oauth",
+                "accounts.google.com", "about:blank")
+    deadline = time.time() + wait
+    try:
+        while time.time() < deadline:
+            current = driver.url()
+            if current and not any(m in current for m in loginish):
+                driver.wait(1500)                 # let the SPA settle
+                view = pageview.parse(driver.html(), url=driver.url())
+                shot = os.path.join(repo_root, cfg["state"]["dir"], "screens",
+                                    "login-%s-%s.png"
+                                    % (site.replace(".", "-"),
+                                       time.strftime("%Y%m%d-%H%M%S")))
+                driver.screenshot(shot)
+                print("login: authorized — %s" % view.url)
+                print("login: page %r" % view.title)
+                print("login: profile kept in %s" % driver.profile_dir)
+                return 0
+            driver.wait(1000)
+        print("login: timeout, still at %s" % driver.url())
+        return 3
+    finally:
+        driver.close()
+
+
+def cmd_signup(repo_root, args):
+    """An AI fills a registration form: snapshot -> decide -> act -> repeat.
+
+    Nothing is clicked unless BOTH `allow_live = true` in the config and
+    `--yes` on the command line: creating accounts is an external, hard to
+    undo action. Without them the run prints the first planned step.
+    """
+    import browser
+    import signup as signup_mod
+
+    url = args.sub if str(getattr(args, "sub", "")).startswith("http") else ""
+    if not url and args.query:
+        url = args.query[0]
+    if not url:
+        print("usage: ./ai_Pobisk.sh signup https://site/register [--yes] [--dry-run]")
+        return 2
+    cfg, adapters = build(repo_root)
+    conf = cfg["signup"]
+    profile_path = getattr(args, "profile", "") or os.path.join(
+        repo_root, conf.get("profile") or "configs/profile.toml")
+    if not os.path.isabs(profile_path):
+        profile_path = os.path.join(repo_root, profile_path)
+    profile = signup_mod.Profile.load(profile_path)
+    if not profile.value("email"):
+        print("signup: no e-mail in %s — copy configs/profile.example.toml"
+              % profile_path)
+        return 2
+    if not browser.available():
+        print(browser.install_hint())
+        return 2
+
+    # Two consents, both required: the project-level switch says "this machine
+    # may create accounts", --yes says "this particular run may". Either alone
+    # is a mistake waiting to happen — a config left on, or a reflex --yes.
+    live = bool(args.yes) and bool(conf.get("allow_live"))
+    site = signup_mod.site_of(url)
+    driver = browser.PlaywrightDriver(
+        os.path.join(repo_root, cfg["state"]["dir"], "browser", site),
+        headless=bool(conf.get("headless", True)) and not args.headed,
+        slow_mo_ms=0)
+    mail = None
+    if cfg["mail"].get("host"):
+        from mailbox import Mail
+        mail = Mail(cfg["mail"])
+
+    thinker = signup_mod.Thinker(repo_root, cfg, adapters)
+    runner = signup_mod.Signup(repo_root, cfg, driver, thinker=thinker,
+                               mail=mail, profile=profile)
+    if not live:
+        why = ("allow_live = false in [signup]" if not conf.get("allow_live")
+               else "no --yes on the command line")
+        print("signup: dry run (%s) — nothing is clicked" % why)
+    try:
+        res = runner.run(url, dry_run=not live, max_steps=args.max_steps,
+                         allow_live=live, save_password=args.save_password)
+    finally:
+        try:
+            shot = os.path.join(repo_root, conf.get("screens_dir") or
+                                ".ai_pobisk/screens",
+                                "%s-%s.png" % (site.replace(".", "-"),
+                                               time.strftime("%Y%m%d-%H%M%S")))
+            driver.screenshot(shot)
+        except Exception:
+            pass
+        driver.close()
+        if mail is not None:
+            mail.close()
+
+    print()
+    print("status : %s" % res["status"])
+    print("site   : %s" % res["site"])
+    print("reason : %s" % res["reason"])
+    print("steps  : %s   llm calls: %s   model: %s"
+          % (res["steps"], res["llm_calls"],
+             "%s/%s" % res["model"] if res["model"] else "rules only"))
+    if res.get("login"):
+        print("login  : %s" % res["login"])
+    if res.get("trace"):
+        print("trace  : %s" % res["trace"])
+    return 0 if res["status"] in ("registered", "dry_run") else 3
+
+
 def cmd_self_test(repo_root, args):
     cfg, adapters = build(repo_root)
     print("repo: %s" % repo_root)
@@ -637,7 +854,7 @@ def main():
     ap.add_argument("command", nargs="?", default="run",
                     choices=["run", "list", "status", "skills", "self-test",
                              "graft", "watch", "check", "serve", "report",
-                             "tail", "drakon"])
+                             "tail", "drakon", "mail", "signup", "login"])
     ap.add_argument("--task", help="run only this task file name")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan, do not call any model")
@@ -667,6 +884,33 @@ def main():
                     help="check: shell command to run when a threshold fires")
     ap.add_argument("--probe", action="store_true",
                     help="skills: really ping each model (spends one ask each)")
+    # ── mail / signup ─────────────────────────────────────────────────────────
+    ap.add_argument("--wait", type=float, default=0.0,
+                    help="mail: block up to SEC seconds waiting for a new code")
+    ap.add_argument("--code", action="store_true",
+                    help="mail: print only the code")
+    ap.add_argument("--from", dest="sender", metavar="ADDR", default="",
+                    help="mail: only letters whose From contains ADDR")
+    ap.add_argument("--subject", metavar="TEXT", default="",
+                    help="mail: only letters whose Subject contains TEXT")
+    ap.add_argument("--days", type=int, default=0,
+                    help="mail: only letters from the last N days")
+    ap.add_argument("--links", metavar="HOST", default="",
+                    help="mail: only links on HOST (and its subdomains)")
+    ap.add_argument("--raw", action="store_true",
+                    help="mail: also print the body")
+    ap.add_argument("--profile", metavar="PATH", default="",
+                    help="signup: who we are (default: [signup].profile)")
+    ap.add_argument("--yes", action="store_true",
+                    help="signup: really click; without it the run is a dry run")
+    ap.add_argument("--headless", action="store_true",
+                    help="signup: hide the browser window (the default)")
+    ap.add_argument("--headed", action="store_true",
+                    help="signup: show the window (captcha / debugging)")
+    ap.add_argument("--save-password", dest="save_password", action="store_true",
+                    help="signup: store the generated password in ~/.ai-rotate")
+    ap.add_argument("--max-steps", dest="max_steps", type=int, default=0,
+                    help="signup: step cap (default: [signup].max_steps)")
     # Legacy spellings from План.md, kept so old notes still work.
     ap.add_argument("--list", dest="flag_list", action="store_true",
                     help="alias for the `list` command")
@@ -684,7 +928,8 @@ def main():
           "skills": cmd_skills, "self-test": cmd_self_test,
           "graft": cmd_graft, "watch": cmd_watch, "check": cmd_check,
           "serve": cmd_serve, "report": cmd_report, "tail": cmd_tail,
-          "drakon": cmd_drakon}[args.command]
+          "drakon": cmd_drakon, "mail": cmd_mail, "signup": cmd_signup,
+          "login": cmd_login}[args.command]
     return fn(repo_root, args)
 
 

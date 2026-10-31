@@ -1,0 +1,30 @@
+# profile.example.toml — who the registration agent is filling forms for.
+#
+#   cp configs/profile.example.toml configs/profile.toml
+#
+# configs/profile.toml is gitignored: it holds personal data. Keep the real
+# password out of it — leave `password` empty and let the agent generate one
+# (it is saved to the 0600 store with --save-password, never to the repo).
+
+email = "gh1@igrasu.ru"
+name = "Михаил"
+surname = "Попов"
+login = "gh1"                 # username on sites that ask for one
+phone = ""                    # leave empty if you do not want SMS flows
+birthdate = ""                # YYYY-MM-DD if a form insists
+city = ""
+country = "RU"
+password = ""                 # empty -> generated per site
+
+# Anything else a form might ask for. The key is matched against the field's
+# name/label, so `inn = "..."` fills a field named `inn` or labelled "ИНН".
+[extra]
+company = ""
+
+# Per-site overrides. The key is the host without www.
+[sites."example.com"]
+login = "gh1-example"
+email = "gh1@igrasu.ru"
+
+[sites."example.com".extra]
+company = "ИП Попов"

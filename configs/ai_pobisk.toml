@@ -99,6 +99,11 @@ same_repo_guard = true
 # impossible for them and they answer "I cannot access your files" — which
 # looks like success (exit 0, polite prose) and silently completes nothing.
 # Agent skills first; API skills only as a last resort.
+#
+# On top of the order, a step that changes files on disk never reaches the
+# API workers at all: they are dropped from that step's worker list (see
+# workers.no_filesystem below). Text steps still use them — that is the one
+# thing they are good at.
 [workers]
 order = ["cline", "opencode", "nvidia", "tokenharbor"]
 # freebuff is a TUI with no prompt mode: capacity probe only, never a worker.
@@ -121,7 +126,34 @@ patterns = [
   "if you can paste the contents",
 ]
 # Skills whose calls are bare completions (no tools) — the check applies.
+# These are dropped from the worker list of any step that edits files.
+# The adapters also declare `has_filesystem = False`; the two are unioned, so
+# this list can only ever exclude a worker, never mis-route file work.
 skills = ["nvidia", "tokenharbor"]
+
+# ── Capability routing ────────────────────────────────────────────────────────
+# How the supervisor decides that a step needs to change files on disk.
+#
+# Most precise signal first:
+#   1. an explicit directive in the task body — `# requires: filesystem` or
+#      `# requires: text`. The author of the task always wins.
+#   2. the task names a directory that exists (that is the repo the work is
+#      about, so the work happens in files).
+#   3. the words below.
+#
+# Both ways of being wrong are harmless: a text task misread as a file task
+# only skips the API workers, and a file task misread as a text task is caught
+# by workers.no_filesystem.patterns when the worker admits it cannot see the
+# files. So the list is kept narrow on purpose — "code" and "translate" are
+# NOT in it, because a pure text task about code is exactly what an API
+# worker is good at.
+[capabilities]
+file_task_keywords = [
+  "файл", "репозитор", "репозиторий", "коммит", "пуш", "ветк", "папк",
+  "директор", "git",
+  "file", "repo", "commit", "push", "branch", "folder", "directory",
+  "filename",
+]
 
 # ── Questions from the model ──────────────────────────────────────────────────
 [questions]
@@ -183,3 +215,56 @@ notify_cmd = ""
 dir = ".ai_pobisk"
 journal = "journal.md"
 state_file = "state.json"
+
+# ── Mail: where confirmation letters arrive ───────────────────────────────────
+# Used by `signup` when a site sends a code or a "confirm your address" link.
+# Only the coordinates live here. The password comes from
+# AI_POBISK_IMAP_PASSWORD or the 0600 store (~/.ai-rotate/secrets.json):
+#   python3 .agents/skills/_shared/secrets.py set imap_gh1 'пароль-ящика'
+# Handyhost, domain igrasu.ru: IMAP mail.igrasu.ru:993 SSL, SMTP 465 SSL.
+# The folder is opened read-only — the agent never marks your mail as read.
+[mail]
+host = "mail.igrasu.ru"
+port = 993
+ssl = true
+user = "gh1@igrasu.ru"
+folder = "INBOX"
+# Name of the key in the shared secret store (not the password itself).
+password_secret = "imap_gh1"
+# How often to poll while waiting for a letter, and how long to wait in total.
+poll_sec = 5
+timeout_sec = 180
+# Escape hatch for sites with an unusual code format, e.g. "код\\s*[:—-]\\s*(\\w+)"
+code_regex = ""
+
+# ── Signup: an AI that fills forms on sites that have no API ──────────────────
+# The loop is: snapshot -> decide -> act -> snapshot. The model decides where a
+# value goes; this program decides what the value is (placeholders are resolved
+# in code, so the password never enters a prompt).
+[signup]
+# Who we are. Personal data, so the file is gitignored; start from the example:
+#   cp configs/profile.example.toml configs/profile.toml
+profile = "configs/profile.toml"
+# Creating accounts is opt-in twice: allow_live here AND --yes on the command.
+# Without them every run is a dry run that only prints the first planned step.
+allow_live = true
+# Headless by default: the browser must work in the background and never steal
+# focus. `signup --headed` opens a window for the one case that needs a human
+# (a captcha), and `login` always opens one — that command exists for OAuth.
+headless = true
+max_steps = 40
+# Model calls per registration. Rules handle the ordinary form without any.
+max_llm_calls = 25
+llm_timeout_sec = 60
+# Below this confidence the loop stops and asks instead of clicking.
+min_confidence = 0.35
+# How long to wait for the code letter before giving up.
+mail_timeout_sec = 180
+# Captcha, SMS code, payment -> "blocked", i.e. a question to the owner.
+# Solving them is a ToS violation and an arms race; the agent does not try.
+stop_on_blockers = true
+# Tick the "I accept the terms" box. Every tick is written to the trace.
+accept_terms = true
+max_wall_clock_sec = 600
+# Empty -> reuse [meta.candidates]. A cheap model is enough: one action per step.
+candidates = []

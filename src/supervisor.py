@@ -45,6 +45,18 @@ NUDGE = (
     "when finished."
 )
 
+# Words that mean "a file or a repo is involved". Deliberately narrow: a false
+# positive only costs a cheap worker, while a false negative is caught later
+# by classify(), when the worker admits it cannot see the files. So this list
+# names files and version control — not "code" or "translate", which appear in
+# plenty of pure text tasks that a completion API handles perfectly well.
+FILE_TASK_KEYWORDS = (
+    "файл", "репозитор", "репозиторий", "коммит", "пуш", "ветк", "папк",
+    "директор", "git",
+    "file", "repo", "commit", "push", "branch", "folder", "directory",
+    "filename",
+)
+
 
 def _nudge_prompt(step):
     """Append the autonomy instruction to a step prompt."""
@@ -82,6 +94,22 @@ class Supervisor:
         self._tried = {}      # skill -> set of model ids already attempted
         self._graft_ctx = None   # lazy: import graftctx only when enabled
         self._ctx_cache = {}     # task name -> context block ("" = none)
+        self._sync_no_filesystem()
+
+    def _sync_no_filesystem(self):
+        """Hand the configured no-filesystem list to classify.
+
+        The supervisor is the only holder of the config, and classify() is the
+        only place that can recognise "I cannot access your files". This is
+        where the two meet, so the TOML has exactly one list of skills and
+        patterns and classify has exactly one copy of the rule.
+        """
+        try:
+            import classify as _classify
+            nfs = (self.cfg.get("workers", {}) or {}).get("no_filesystem") or {}
+            _classify.set_no_filesystem(nfs.get("skills"), nfs.get("patterns"))
+        except Exception:
+            pass          # defaults in classify.py stand in for the config
 
     # ── one task ──────────────────────────────────────────────────────────────
     def run_task(self, task, dry_run=False):
@@ -142,6 +170,11 @@ class Supervisor:
         worker_idx = 0
         model = None
 
+        # Capability routing: a bare completion API has no filesystem, so a
+        # step that edits files must never be handed to one. The filtered list
+        # is what this step walks.
+        order = self._eligible_workers(task, step, idx)
+
         budgets = {
             "max_retries": int(self.cfg["budget"]["max_retries_per_step"]),
             "max_model_rot": int(self.cfg["budget"]["max_model_rotations"]),
@@ -152,7 +185,10 @@ class Supervisor:
             "max_iters": int(self.cfg["budget"].get("max_iterations_per_step", 40)),
             "max_nudges": int(self.cfg["budget"].get("max_nudges_per_step", 5)),
             "fatal_floor": float(self.cfg["fallback"]["fatal_confidence_floor"]),
-            "n_workers": len(self.worker_order),
+            # Counts the workers that could actually do THIS step, not every
+            # worker in the list: a file step never reaches the API workers,
+            # so "no workers left" must not wait for them either.
+            "n_workers": len(order),
             # How many times the supervisor may re-open the fleet before it
             # accepts that there are no hands left.
             "max_rediscoveries": int(
@@ -188,7 +224,7 @@ class Supervisor:
                 self._say("  step %d: %s" % (idx, d.reason))
                 return d.result
 
-            skill = self.worker_order[worker_idx]
+            skill = order[worker_idx]
             a = self.adapters[skill]
 
             self._say("  step %d: %s%s" % (idx, skill,
@@ -287,6 +323,86 @@ class Supervisor:
             return "loop_guard"
 
     # ── helpers ───────────────────────────────────────────────────────────────
+    def _no_filesystem_skills(self):
+        """Workers that cannot touch files on disk.
+
+        Two sources, unioned. The adapter knows the truth (nvidia-rotate.sh
+        posts to an HTTP endpoint — nothing about that can change), and the
+        config lets the owner exclude a worker without editing Python. A
+        worker is excluded when EITHER source says so, so the only direction
+        this can move is "away from file work"; it can never accidentally
+        hand file work to a worker that cannot do it.
+        """
+        out = set(self.cfg.get("workers", {})
+                  .get("no_filesystem", {})
+                  .get("skills", ()) or ())
+        for name, a in self.adapters.items():
+            if not getattr(a, "has_filesystem", True):
+                out.add(name)
+        return out
+
+    def _requires_filesystem(self, task, step):
+        """Does this step need to change files on disk?
+
+        Three signals, most precise first:
+
+        1. An explicit directive in the task body — ``# requires: filesystem``
+           or ``# requires: text``. The author of the task always wins.
+        2. The task names a directory that exists: that is the repo the work
+           belongs to, so the work happens in files.
+        3. File or version-control vocabulary in the text.
+
+        Signals 2 and 3 are heuristics, but both ways of being wrong are
+        harmless: a text task misread as a file task merely skips the API
+        workers, and a file task misread as a text task is caught later by
+        classify(), when the worker answers "I cannot access your files".
+        """
+        body = (getattr(task, "body", "") or "")
+        low = ("%s\n%s" % (body, step or "")).lower()
+
+        if "requires: filesystem" in low or "requires: fs" in low:
+            return True
+        if "requires: text" in low or "requires: no-filesystem" in low:
+            return False
+
+        if task is not None and _target_dir_from_task(task):
+            return True
+
+        keywords = self.cfg.get("capabilities", {}).get("file_task_keywords")
+        if keywords is None:
+            keywords = FILE_TASK_KEYWORDS
+        return any(k in low for k in keywords)
+
+    def _eligible_workers(self, task, step, idx=0):
+        """The workers this step may be handed to, in rotation order.
+
+        For a file step, workers without a filesystem are dropped: a bare
+        completion API cannot edit anything, it can only describe. For a text
+        step every worker stays eligible — that is what those APIs are for.
+        """
+        if not self._requires_filesystem(task, step):
+            return list(self.worker_order)
+
+        no_fs = self._no_filesystem_skills()
+        order = [w for w in self.worker_order if w not in no_fs]
+        if not order:
+            # Never strand a task: if every worker claims to be
+            # filesystem-less, walk the full list and let the rules decide.
+            return list(self.worker_order)
+        skipped = [w for w in self.worker_order if w in no_fs]
+        if skipped:
+            self._say("    файловый шаг — пропускаю без ФС: %s"
+                      % ", ".join(skipped))
+            try:
+                self.journal.event(
+                    "file step: skipped %s (no filesystem)"
+                    % ", ".join(skipped),
+                    etype="capability", task=getattr(task, "name", ""),
+                    step=idx, skipped=",".join(skipped))
+            except Exception:
+                pass
+        return order
+
     def _find_hands(self, task_name, idx):
         """Lift transient cooldowns and look at the fleet again.
 

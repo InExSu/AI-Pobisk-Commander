@@ -1,0 +1,16 @@
+# The only non-stdlib dependency in the project.
+#
+# Everything else runs on the Python standard library. A browser cannot: it
+# needs a protocol client and a Chromium build, and writing those would be a
+# second project. So Playwright lives here, and it is installed *into the
+# project* — a local .venv plus .playwright/ for the browser binaries, so
+# nothing leaks into the machine's global site-packages or cache.
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#   PLAYWRIGHT_BROWSERS_PATH=$PWD/.playwright .venv/bin/python -m playwright install chromium
+#
+# ./ai_Pobisk.sh picks up .venv/bin/python automatically and points Playwright
+# at .playwright/, so no environment variables are needed afterwards.
+
+playwright>=1.40

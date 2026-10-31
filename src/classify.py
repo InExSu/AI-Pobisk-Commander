@@ -143,9 +143,34 @@ QUESTION_PATTERNS = re.compile(
 # next to the pattern: adding a skill here is what arms the check for it.
 NO_FILESYSTEM_SKILLS = ("nvidia", "tokenharbor")
 
+# The check above is the default; configs/ai_pobisk.toml can replace both the
+# skill list and the patterns at startup (see set_no_filesystem). Keeping one
+# copy matters: two lists that drift apart mean the config says one thing and
+# the code does another.
+_NO_FS_SKILLS = set(NO_FILESYSTEM_SKILLS)
+_NO_FS_PATTERNS = NO_FILESYSTEM_PATTERNS
+
+
+def set_no_filesystem(skills=None, patterns=None):
+    """Point the no-filesystem check at the configured skills and patterns.
+
+    Called once at startup by the supervisor, which is the only place that
+    holds the config. Returns the effective skill set.
+    """
+    global _NO_FS_SKILLS, _NO_FS_PATTERNS
+    if skills:
+        _NO_FS_SKILLS = set(skills)
+    if patterns:
+        try:
+            _NO_FS_PATTERNS = re.compile(
+                "|".join("(?:%s)" % p for p in patterns), re.I)
+        except re.error:
+            pass          # a bad pattern must not disable the check
+    return set(_NO_FS_SKILLS)
+
 
 def classify(text, http=None, skill="", model="", account="", elapsed_ms=0,
-             no_fs_skills=NO_FILESYSTEM_SKILLS):
+             no_fs_skills=None):
     """Map raw output + HTTP code to an Outcome.
 
     HTTP code is consulted when present: it is more reliable than prose, which
@@ -162,6 +187,7 @@ def classify(text, http=None, skill="", model="", account="", elapsed_ms=0,
 
     text = text or ""
     detail = _brief(text, http)
+    no_fs_skills = _NO_FS_SKILLS if no_fs_skills is None else set(no_fs_skills)
 
     # Checked FIRST, before any error rule: a confirmation prompt is not a
     # failure, and error patterns (429, "continue?") can appear in the same
@@ -208,7 +234,7 @@ def classify(text, http=None, skill="", model="", account="", elapsed_ms=0,
 
     # Capability gap, checked before the benign path: a "no filesystem" reply
     # is prose with no error string, so it would otherwise be scored `ok`.
-    if skill in no_fs_skills and NO_FILESYSTEM_PATTERNS.search(text or ""):
+    if skill in no_fs_skills and _NO_FS_PATTERNS.search(text or ""):
         return Outcome(ROTATE_ACCOUNT, skill, model, account,
                        "no file access: bare completion cannot do file work",
                        http, elapsed_ms, text)

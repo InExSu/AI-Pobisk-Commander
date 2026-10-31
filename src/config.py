@@ -36,8 +36,28 @@ DEFAULTS = {
         # worker list again before accepting that there are no hands left.
         "max_rediscoveries": 2,
     },
-    "workers": {"order": ["nvidia", "tokenharbor", "opencode", "cline"],
-                "non_workers": ["freebuff"]},
+    # Order is by CAPABILITY, not by reliability. cline/opencode run a real
+    # agent with file tools and can do the work; nvidia/tokenharbor are bare
+    # completion calls with no filesystem, so they come last and are dropped
+    # entirely for steps that edit files.
+    "workers": {"order": ["cline", "opencode", "nvidia", "tokenharbor"],
+                "non_workers": ["freebuff"],
+                # Workers with no filesystem: a completion call cannot read or
+                # write the repo. Unioned with the adapters' own `has_filesystem`
+                # flag, so this list can only ever exclude, never mis-route.
+                "no_filesystem": {"skills": ["nvidia", "tokenharbor"]}},
+    # How a step is classified as "changes files on disk". An explicit
+    # `# requires: filesystem` / `# requires: text` in the task body always wins;
+    # otherwise a task naming an existing directory counts, and failing that
+    # these words decide.
+    "capabilities": {
+        "file_task_keywords": [
+            "файл", "репозитор", "репозиторий", "коммит", "пуш", "ветк",
+            "папк", "директор", "git",
+            "file", "repo", "commit", "push", "branch", "folder", "directory",
+            "filename",
+        ],
+    },
     "questions": {
         "auto_answer_from": ["AGENTS.md", "README.md", "configs/", "docs/"],
         "ask_owner_when_confidence_below": 0.6,
@@ -55,6 +75,37 @@ DEFAULTS = {
     "tasks": {"dir": "configs/tasks", "skip_empty": True},
     "state": {"dir": ".ai_pobisk", "journal": "journal.md",
               "state_file": "state.json"},
+    # ── mail: where confirmation letters arrive ───────────────────────────────
+    # Only the coordinates live here. The password comes from
+    # AI_POBISK_IMAP_PASSWORD or the 0600 shared store — never from the repo.
+    "mail": {
+        "host": "",
+        "port": 993,
+        "ssl": True,
+        "user": "",
+        "folder": "INBOX",
+        "password_env": "AI_POBISK_IMAP_PASSWORD",
+        "password_secret": "",
+        "poll_sec": 5,
+        "timeout_sec": 180,
+        "code_regex": "",
+    },
+    # ── signup: an AI that fills forms on sites that have no API ──────────────
+    "signup": {
+        "profile": "configs/profile.toml",
+        "allow_live": False,        # creating accounts is opt-in, twice
+        "headless": False,          # a human should be able to watch
+        "max_steps": 40,
+        "max_llm_calls": 25,
+        "llm_timeout_sec": 60,
+        "min_confidence": 0.35,
+        "mail_timeout_sec": 180,
+        "stop_on_blockers": True,   # captcha / sms / payment -> ask the owner
+        "accept_terms": True,       # tick the ToS box, and log that it was done
+        "max_wall_clock_sec": 600,
+        "candidates": [],           # empty -> reuse [meta.candidates]
+        "screens_dir": ".ai_pobisk/screens",
+    },
 }
 
 

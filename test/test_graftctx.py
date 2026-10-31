@@ -68,6 +68,67 @@ class TestParsing(unittest.TestCase):
             graftctx._run = orig
 
 
+class TestHasGraph(unittest.TestCase):
+    """A directory called `graft` is not a graph — the artefacts are."""
+
+    def _repo(self, files):
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, True))
+        for rel in files:
+            p = os.path.join(d, rel)
+            if rel.endswith("/"):
+                os.makedirs(p, exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").close()
+        return d
+
+    def test_empty_dir_named_graft_is_not_a_graph(self):
+        # This is the bug that made `graft status` print "graph: built" while
+        # the CLI was missing entirely.
+        self.assertFalse(G.has_graph(self._repo(["graft/"])))
+
+    def test_wiring_json_counts(self):
+        self.assertTrue(G.has_graph(self._repo(["graft/.graph/wiring.json"])))
+
+    def test_index_md_counts(self):
+        self.assertTrue(G.has_graph(self._repo(["graft/INDEX.md"])))
+
+
+class TestQueryLanguage(unittest.TestCase):
+    """`ask` indexes English; a Cyrillic question is a guaranteed miss."""
+
+    def test_russian_is_not_latin(self):
+        self.assertFalse(G.mostly_latin("как супервизор решает сменить модель"))
+
+    def test_mixed_but_russian_is_not_latin(self):
+        # Task files are Russian with a few Latin words sprinkled in — that
+        # must still count as Russian.
+        self.assertFalse(G.mostly_latin(
+            "Для ускорения работы в проект интегрирован Graft."))
+
+    def test_english_is_latin(self):
+        self.assertTrue(G.mostly_latin("rotate model when the limit is reached"))
+
+    def test_empty_is_not_latin(self):
+        self.assertFalse(G.mostly_latin(""))
+
+    def test_cyrillic_query_does_not_call_ask(self):
+        calls = []
+        orig = (G.available, G.has_graph, G.ask, G.repo_map)
+        G.available = lambda: True
+        G.has_graph = lambda root: True
+        G.ask = lambda root, q, limit=8: calls.append(q) or "HITS"
+        G.repo_map = lambda root: "MAP"
+        try:
+            block = G.context_for("/tmp", "как супервизор меняет модель")
+        finally:
+            G.available, G.has_graph, G.ask, G.repo_map = orig
+        self.assertEqual(calls, [])          # no wasted subprocess
+        self.assertIn("MAP", block)          # the map still comes through
+
+
 class TestTruncation(unittest.TestCase):
     def test_context_is_capped(self):
         self.assertLessEqual(G.MAX_CONTEXT_CHARS, 8000)

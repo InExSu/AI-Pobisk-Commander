@@ -1,14 +1,20 @@
 """supervisor.py — the loop that keeps a task alive.
 
-For each step: pick a worker, run it, read the Outcome, decide what to do.
+The decisions are not made here. They live in `statemachine.py` as one table
+of states and transitions, and this module only performs the side effects each
+transition implies: call an adapter, bump a counter, rotate a model, ask the
+meta model. That split is deliberate — the DRAKON silhouette in
+`./ai_Pobisk.sh drakon` is generated from the same table, so the picture and
+the code cannot drift apart.
 
-    ok              -> next step
-    retry           -> same worker/model again, capped
+    dispatch   -> call the adapter
+    ok         -> next step
+    retry      -> same worker/model again, capped
     rotate_model    -> another model on the same skill
     rotate_account  -> another account/skill
-    question        -> competence check (see competence.py)
-    fatal           -> stop the task, report
-    loop_guard      -> stop the task, report
+    question   -> competence check (see competence.py)
+    fatal      -> stop the task, report
+    loop_guard -> stop the task, report
 
 The meta model is consulted only when the rule table has no answer, when a
 budget is exhausted, or when the outcome is `question`. Every other decision
@@ -26,8 +32,7 @@ for p in (_HERE, os.path.join(_HERE, "adapters"),
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from outcome import (OK, RETRY, ROTATE_MODEL, ROTATE_ACCOUNT,  # noqa: E402
-                     FATAL, QUESTION, WAITING, LOOP_GUARD)
+import statemachine as sm       # noqa: E402
 
 # Answer a confirmation prompt on the user's behalf. Phrased to cover the
 # shapes agents actually emit (y/N, Enter, "any key") without being so
@@ -76,14 +81,14 @@ class Supervisor:
         self.non_workers = set(cfg["workers"]["non_workers"])
         self._tried = {}      # skill -> set of model ids already attempted
         self._graft_ctx = None   # lazy: import graftctx only when enabled
-        self._graft_root = None  # resolved once: the repo the task targets
+        self._ctx_cache = {}     # task name -> context block ("" = none)
 
     # ── one task ──────────────────────────────────────────────────────────────
     def run_task(self, task, dry_run=False):
         name = task.name
         st = self.journal.task_state(name)
         self.journal.section("task %s" % name)
-        self._say("task %s: %s" % (name, task.title))
+        self._say("task %s: %s" % (name, task.subtitle[:90]))
 
         if dry_run:
             for i, step in enumerate(task.steps(), 1):
@@ -124,6 +129,12 @@ class Supervisor:
 
     # ── one step ──────────────────────────────────────────────────────────────
     def run_step(self, task, idx, step):
+        """Drive one step through the control machine.
+
+        The machine says *what* to do; this method does it. Every branch below
+        is the side effect of a state the machine chose — there are no
+        decisions left in this function.
+        """
         name = task.name
         attempts = self.journal.attempts(name)
         model_rot = 0
@@ -131,24 +142,37 @@ class Supervisor:
         worker_idx = 0
         model = None
 
-        cap_retry = int(self.cfg["budget"]["max_retries_per_step"])
-        cap_model = int(self.cfg["budget"]["max_model_rotations"])
-        cap_acct = int(self.cfg["budget"]["max_account_rotations"])
+        budgets = {
+            "max_retries": int(self.cfg["budget"]["max_retries_per_step"]),
+            "max_model_rot": int(self.cfg["budget"]["max_model_rotations"]),
+            "max_acct_rot": int(self.cfg["budget"]["max_account_rotations"]),
+            # Hard iteration cap. The meta model can ask for another attempt,
+            # and invariants can rotate; neither may loop without bound. This
+            # is the backstop that makes every other rule safe to be wrong.
+            "max_iters": int(self.cfg["budget"].get("max_iterations_per_step", 40)),
+            "max_nudges": int(self.cfg["budget"].get("max_nudges_per_step", 5)),
+            "fatal_floor": float(self.cfg["fallback"]["fatal_confidence_floor"]),
+            "n_workers": len(self.worker_order),
+        }
 
-        # Hard iteration cap. The meta model can ask for another attempt, and
-        # invariants can rotate; neither may loop without bound. This is the
-        # backstop that makes every other rule safe to be wrong about.
-        max_iters = int(self.cfg["budget"].get("max_iterations_per_step", 40))
         iters = 0
-
         while True:
             iters += 1
-            if iters > max_iters:
-                self._say("  step %d: iteration cap (%d) — stopping" % (idx, max_iters))
-                return "loop_guard"
-            if worker_idx >= len(self.worker_order):
-                self._say("  step %d: no workers left" % idx)
-                return "exhausted"
+            counters = {
+                "iters": iters,
+                "worker_idx": worker_idx,
+                "retry": attempts.get("retry", 0),
+                "nudges": attempts.get("nudge", 0),
+                "model_rot": model_rot,
+                "acct_rot": acct_rot,
+            }
+
+            # ── pre-call guards: no worker is hired when the run is out ──────
+            d = sm.guard(counters, budgets)
+            if d:
+                self._say("  step %d: %s" % (idx, d.reason))
+                return d.result
+
             skill = self.worker_order[worker_idx]
             a = self.adapters[skill]
 
@@ -172,52 +196,38 @@ class Supervisor:
                 elapsed_ms=o.elapsed_ms,
                 attempt_no=attempts.get("attempt", 0))
 
-            if o.outcome == OK:
-                return "ok"
+            # ── the machine decides ──────────────────────────────────────────
+            d = sm.decide(o, counters, budgets)
+            if d.state == sm.META:
+                # Only the long tail gets here: errors the rule table never
+                # heard of. The meta model must answer with one of the agreed
+                # verdicts; the code still owns the budgets.
+                verdict, conf, reason = self.meta.decide(
+                    o, {"task": name, "step": idx, "skill": skill,
+                        "tried": sorted(self._tried.get(skill, set()))}, attempts)
+                self.journal.event(
+                    "meta: %s conf=%.2f (%s)" % (verdict, conf, reason),
+                    etype="meta", task=name, step=idx, skill=skill,
+                    verdict=verdict, confidence=conf, outcome=o.outcome)
+                self._say("    meta: %s (%.2f) %s" % (verdict, conf, reason))
+                d = sm.resolve_meta(verdict, conf, counters, budgets)
+            elif d.state in (sm.LOOP_ST, sm.EXHAUSTED_ST):
+                self.journal.event("invariant: %s" % d.reason,
+                                   etype="invariant", task=name, step=idx,
+                                   skill=skill, directive=d.event,
+                                   outcome=o.outcome)
+                self._say("    invariant: %s" % d.reason)
 
-            # ── INVARIANT FIRST ───────────────────────────────────────────────
-            # Everything below is a hard rule the model must NOT get a vote on.
-            # The meta model decides the *interesting* cases; the code decides
-            # the ones where being wrong is unrecoverable or absurd.
-            inv = self._invariant(o, attempts, cap_retry)
-            if inv:
-                self.journal.event("invariant: %s" % inv, etype="invariant",
-                                   task=name, step=idx, skill=skill,
-                                   directive=inv, outcome=o.outcome)
-                self._say("    invariant: %s" % inv)
-                if inv == "stop_budget":
-                    return "exhausted"
-                if inv == "stop_loop":
-                    return "loop_guard"
-                if inv == "rotate_model":
-                    model_rot += 1
-                    if model_rot > cap_model:
-                        worker_idx += 1
-                        model = None
-                        model_rot = 0
-                        continue
-                    model = self._next_model(skill, model)
-                    self.journal.bump(name, "model")
-                    continue
-                if inv == "rotate_account":
-                    acct_rot += 1
-                    if acct_rot > cap_acct:
-                        return "exhausted"
-                    worker_idx += 1
-                    model = None
-                    self.journal.bump(name, "account")
-                    continue
+            if d.terminal:
+                self._say("    -> %s (%s)" % (d.state, d.reason))
+                return d.result
 
-            # ── confirmations: never a meta question ──
-            if o.outcome == WAITING:
+            if d.state == sm.NUDGE:
                 # The model stopped on a confirmation prompt. Nobody is at the
                 # keyboard, so ai_Pobisk answers for the user and tells it to
                 # carry on. Capped: a model stuck in a confirmation loop would
                 # otherwise be nudged forever.
                 n = self.journal.bump(name, "nudge")
-                if n > int(self.cfg["budget"].get("max_nudges_per_step", 5)):
-                    self._say("    stuck on prompts (%d nudges) — stopping" % n)
-                    return "loop_guard"
                 self._say("    model waits for input — nudging (attempt %d)" % n)
                 self.journal.event("nudge: %s" % o.detail[:80], etype="nudge",
                                    task=name, step=idx, skill=skill,
@@ -225,97 +235,43 @@ class Supervisor:
                 step = _nudge_prompt(step)
                 continue
 
-            if o.outcome == QUESTION:
+            if d.state == sm.QUESTION_ST:
                 answer = self._handle_question(task, o)
                 if answer is None:
                     return "needs_owner"
                 step = "%s\n\nAdditional context from ai_Pobisk: %s" % (step, answer)
                 continue
 
-            if o.outcome == LOOP_GUARD:
-                self._say("    loop guard — stopping step")
-                return "loop_guard"
+            if d.state == sm.RETRY_ST:
+                self.journal.bump(name, "retry")
+                continue
 
-            # ── the model decides ─────────────────────────────────────────────
-            # Every case the invariants did not settle goes to the meta model:
-            # unrecognised errors, weird half-answers, new provider messages,
-            # anything the rule table never heard of. It must answer with one
-            # of the agreed verdicts; the code enforces that and the budgets.
-            verdict, conf, reason = self.meta.decide(
-                o, {"task": name, "step": idx, "skill": skill,
-                    "tried": sorted(self._tried.get(skill, set()))}, attempts)
-            self.journal.event("meta: %s conf=%.2f (%s)" % (verdict, conf, reason),
-                               etype="meta", task=name, step=idx, skill=skill,
-                               verdict=verdict, confidence=conf,
-                               outcome=o.outcome)
-            self._say("    meta: %s (%.2f) %s" % (verdict, conf, reason))
-
-            floor = float(self.cfg["fallback"]["fatal_confidence_floor"])
-            if verdict == FATAL and conf >= floor:
-                return "fatal"
-            if verdict == FATAL and conf < floor:
-                verdict = ROTATE_ACCOUNT      # unsure: try elsewhere
-
-            if verdict == RETRY:
-                n = self.journal.bump(name, "retry")
-                if n <= cap_retry:
+            if d.state == sm.ROTATE_MODEL_ST:
+                model_rot += 1
+                if model_rot > budgets["max_model_rot"]:
+                    worker_idx += 1
+                    model = None
+                    model_rot = 0
                     continue
-                model_rot += 1
                 model = self._next_model(skill, model)
+                self.journal.bump(name, "model")
                 continue
-            if verdict == ROTATE_MODEL:
-                model_rot += 1
-                model = self._next_model(skill, model)
-                continue
-            if verdict == ROTATE_ACCOUNT:
+
+            if d.state == sm.ROTATE_ACCOUNT_ST:
                 acct_rot += 1
+                if acct_rot > budgets["max_acct_rot"]:
+                    return "exhausted"
                 worker_idx += 1
                 model = None
+                self.journal.bump(name, "account")
                 continue
-            return "fatal"
+
+            # Unknown state: a machine bug, not a model bug. Stop rather than
+            # spin on a transition nobody defined.
+            self._say("    unknown state %r — stopping" % d.state)
+            return "loop_guard"
 
     # ── helpers ───────────────────────────────────────────────────────────────
-    def _invariant(self, o, attempts, cap_retry):
-        """Hard rules the meta model may NOT override. Returns a directive.
-
-        The meta model handles the long tail — the infinite variety of ways a
-        model can stall, refuse, or half-answer, which no rule table can
-        enumerate. But some things must never be negotiable:
-
-        * budgets — a model that says "retry" forever would run forever
-        * credential/wallet failures — retrying cannot fix them
-        * "no filesystem" — the worker lacks the capability, not the luck
-        * confirmations — nobody is at the keyboard, so the answer is always
-          "continue"; asking a model whether to ask the owner is absurd
-        * loop_guard — already spinning, stop
-
-        Returns one of: rotate_model, rotate_account, stop_budget, stop_loop,
-        or None ("not my call — let the meta model decide").
-        """
-        # Already spinning: stop, no discussion.
-        if o.outcome == LOOP_GUARD:
-            return "stop_loop"
-
-        # Nobody at the keyboard: answer "continue" and carry on. Asking the
-        # meta model whether to involve the owner here is nonsense.
-        if o.outcome == WAITING:
-            return None      # handled by the nudge branch below
-
-        # Budget spent: retrying further is an infinite loop.
-        if o.outcome == RETRY and attempts.get("retry", 0) >= cap_retry:
-            return "rotate_model"
-
-        # Credential / wallet / capability failures are never retryable.
-        if o.outcome == ROTATE_ACCOUNT:
-            return "rotate_account"
-
-        # A bare completion saying "I cannot access your files" is a
-        # capability gap, not bad luck — no amount of asking changes it.
-        if "no file access" in (o.detail or "").lower():
-            return "rotate_account"
-
-        return None
-
     def _pace(self, outcome):
         """Sleep when attempts come back implausibly fast.
 
@@ -346,34 +302,43 @@ class Supervisor:
     def _with_context(self, task, step):
         """Prepend a code-graph context block to the worker prompt.
 
-        The worker starts with a map instead of re-exploring the repo:
-        graft measures ~42% fewer tokens and ~46% fewer tool calls for the
-        same correctness. Opt-in via config; a missing graft or an unbuilt
-        graph returns the prompt untouched, so this can never break a run.
+        The worker starts with a map instead of re-exploring the repo.
+        Opt-in via config; a missing graft or an unbuilt graph returns the
+        prompt untouched, so this can never break a run.
+
+        Computed once per task and cached: `_with_context` runs on every loop
+        iteration, and a step can be retried or nudged dozens of times. Two
+        subprocess calls per iteration would dominate the run — and for a repo
+        with no graph they would all return nothing anyway.
         """
         g = self.cfg.get("graft") or {}
         if not g.get("enabled"):
             return step
-        # Map the repo the TASK is about, not the repo ai_Pobisk lives in.
-        # With repo = "" the worker got a map of ai_Pobisk's own src/ while
-        # being asked to add games to igrasu.ru — context that actively
-        # misleads. The task's target directory decides the graph.
-        if self._graft_root is None:
+
+        block = self._ctx_cache.get(task.name)
+        if block is None:
+            # Map the repo the TASK is about, not the repo ai_Pobisk lives in.
+            # With repo = "" the worker got a map of ai_Pobisk's own src/ while
+            # being asked to add games to igrasu.ru — context that actively
+            # misleads. Resolved per task, not once per run.
             explicit = (g.get("repo") or "").strip()
-            self._graft_root = explicit or _target_dir_from_task(task) or self.repo_root
-        root = self._graft_root
-        if self._graft_ctx is None:
-            try:
-                import graftctx
-                self._graft_ctx = graftctx
-            except Exception:
-                self._graft_ctx = False
-        if not self._graft_ctx:
-            return step
-        block = self._graft_ctx.context_for(root, step)
+            root = explicit or _target_dir_from_task(task) or self.repo_root
+            if self._graft_ctx is None:
+                try:
+                    import graftctx
+                    self._graft_ctx = graftctx
+                except Exception:
+                    self._graft_ctx = False
+            block = ""
+            if self._graft_ctx:
+                block = self._graft_ctx.context_for(root, task.body or step)
+            self._ctx_cache[task.name] = block
+            if block:
+                self.journal.event("graft context: %d chars" % len(block),
+                                   etype="graft", task=task.name)
+
         if not block:
             return step
-        self.journal.event("graft context: %d chars" % len(block))
         return "%s\n\n---\n%s" % (block, step)
 
     def _next_model(self, skill, current):

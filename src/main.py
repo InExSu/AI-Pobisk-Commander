@@ -4,9 +4,16 @@
 Commands:
     run [--task NAME] [--dry-run] [--fresh]   execute tasks from configs/tasks
     list                                      show discovered tasks
-    status                                    show state + pending questions
-    skills                                    show adapters and availability
-    self-test                                 find the meta model, check adapters
+    status [--live] [--json]                  state, or aggregates of a run
+    skills [--probe]                          adapters, health, optional ping
+    self-test                                 meta model + adapters + machine
+    watch [--json] [--interval SEC]           live view during a run
+    tail [--lines N] [--follow]               last events, like tail -f
+    check [--notify-cmd CMD]                  thresholds; exit 1 if breached
+    serve [--port N]                          /metrics in Prometheus format
+    report [--run ID]                         post-hoc breakdown of a run
+    graft [build|ask] [--deep]                code-graph context layer
+    drakon [--svg PATH] [check]               the control machine + silhouette
 """
 
 import argparse
@@ -145,6 +152,14 @@ def cmd_status(repo_root, args):
     if not live:
         j = journal_mod.Journal(repo_root, cfg)
         st = j.state
+        if as_json:
+            # Same shape as the human view, so scripts do not scrape text.
+            print(json.dumps({
+                "state_file": j.state_path,
+                "updated": st.get("updated"),
+                "tasks": st.get("tasks") or {},
+            }, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
         print("state: %s" % j.state_path)
         if not st.get("tasks"):
             print("  no tasks recorded yet")
@@ -193,27 +208,86 @@ def cmd_watch(repo_root, args):
     cfg, _ = build(repo_root)
     m = metrics.Metrics(repo_root, cfg)
     period = float(getattr(args, "interval", 5) or 5)
+    as_json = getattr(args, "json", False)
     try:
         while True:
             summ = metrics.summarize(m.events(run=m.run))
-            os.system("clear")
-            print("ai_Pobisk — run %s   (ctrl-c to stop watching)" % m.run)
-            print()
-            print("%-26s %-12s %-22s %-10s %s"
-                  % ("task", "skill", "model", "status", "elapsed"))
-            for name, t in sorted(summ["tasks"].items()):
-                print("%-26s %-12s %-22s %-10s %.0fs"
-                      % (name[:26], t.get("skill", "-")[:12], "-",
-                         t.get("status", "running"), t.get("elapsed_ms", 0) / 1000.0))
-            print()
-            print("attempts %d · retries %d · nudges %d · rotations %d"
-                  % (summ["attempts"], summ["retries"], summ["nudges"],
-                     summ["rotations"]))
-            for line in metrics.check_thresholds(summ, cfg):
-                print("  !! %s" % line)
+            if as_json:
+                # One JSON document per tick: pipe it into jq, a widget, or a
+                # bot. No screen clearing, no ANSI.
+                summ["run"] = m.run
+                summ["issues"] = metrics.check_thresholds(summ, cfg)
+                print(json.dumps(summ, ensure_ascii=False))
+                sys.stdout.flush()
+            else:
+                os.system("clear")
+                print("ai_Pobisk — run %s   (ctrl-c to stop watching)" % m.run)
+                print()
+                print("%-26s %-12s %-22s %-10s %s"
+                      % ("task", "skill", "model", "status", "elapsed"))
+                for name, t in sorted(summ["tasks"].items()):
+                    print("%-26s %-12s %-22s %-10s %.0fs"
+                          % (name[:26], t.get("skill", "-")[:12], "-",
+                             t.get("status", "running"), t.get("elapsed_ms", 0) / 1000.0))
+                print()
+                print("attempts %d · retries %d · nudges %d · rotations %d"
+                      % (summ["attempts"], summ["retries"], summ["nudges"],
+                         summ["rotations"]))
+                for line in metrics.check_thresholds(summ, cfg):
+                    print("  !! %s" % line)
             time.sleep(period)
     except KeyboardInterrupt:
-        print()
+        if not as_json:
+            print()
+        return 0
+
+
+def cmd_tail(repo_root, args):
+    """Last events, optionally following — the `tail -f` of a run."""
+    cfg, _ = build(repo_root)
+    m = metrics.Metrics(repo_root, cfg)
+    n = int(getattr(args, "lines", 20) or 20)
+    follow = getattr(args, "follow", False)
+    as_json = getattr(args, "json", False)
+
+    def render(ev):
+        if as_json:
+            return json.dumps(ev, ensure_ascii=False)
+        ts = time.strftime("%H:%M:%S", time.localtime(ev.get("ts") or 0))
+        bits = [ts, "%-11s" % (ev.get("type") or "?")]
+        if ev.get("task"):
+            bits.append("%-22s" % str(ev["task"])[:22])
+        if ev.get("skill"):
+            bits.append("%-10s" % ev["skill"])
+        if ev.get("outcome"):
+            bits.append("%-13s" % ev["outcome"])
+        bits.append(str(ev.get("detail") or "")[:100])
+        return " ".join(bits)
+
+    shown = 0
+    for ev in m.events(run=m.run)[-n:]:
+        print(render(ev))
+        shown += 1
+    if not shown:
+        print("no events for run %s" % m.run)
+        return 0
+    if not follow:
+        return 0
+
+    # Follow: remember how many lines we already printed and poll the file.
+    # Cheap (one stat per tick), and it survives log rotation because the
+    # reader re-counts rather than holding a file offset.
+    seen = len(m.events(run=m.run))
+    try:
+        while True:
+            time.sleep(1.0)
+            evs = m.events(run=m.run)
+            if len(evs) > seen:
+                for ev in evs[seen:]:
+                    print(render(ev))
+                sys.stdout.flush()
+                seen = len(evs)
+    except KeyboardInterrupt:
         return 0
 
 
@@ -237,7 +311,7 @@ def cmd_check(repo_root, args):
             issues.append("скилл %s: нет живых моделей (все в cooldown или "
                           "запаркованы)" % name)
 
-    cmd = (cfg.get("monitor") or {}).get("notify_cmd") or ""
+    cmd = getattr(args, "notify_cmd", None) or mon.get("notify_cmd") or ""
     if not issues:
         print("ok — no thresholds breached")
         return 0
@@ -248,7 +322,7 @@ def cmd_check(repo_root, args):
         import subprocess
         try:
             subprocess.run(cmd, shell=True, timeout=60,
-                           input="\n".join(issues))
+                           input="\n".join(issues), text=True)
         except Exception:
             pass
     return 1
@@ -259,7 +333,10 @@ def cmd_serve(repo_root, args):
     import http.server
     cfg, adapters = build(repo_root)
     m = metrics.Metrics(repo_root, cfg)
-    port = int(getattr(args, "port", 9099) or 9099)
+    # `0` is a valid request ("pick a free port"), so it must not be treated
+    # as "missing" — hence an explicit None check, not `or 9099`.
+    port = getattr(args, "port", None)
+    port = 9099 if port is None else int(port)
 
     class H(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -285,6 +362,9 @@ def cmd_serve(repo_root, args):
             pass
 
     srv = http.server.HTTPServer(("127.0.0.1", port), H)
+    # --port 0 asks the OS for a free port; report the one we actually got,
+    # otherwise the caller has no way to find it.
+    port = srv.server_address[1]
     print("metrics on http://127.0.0.1:%d/metrics  (ctrl-c to stop)" % port)
     try:
         srv.serve_forever()
@@ -301,7 +381,7 @@ def cmd_report(repo_root, args):
     if not runs:
         print("no events recorded yet")
         return 0
-    want = getattr(args, "run", None)
+    want = getattr(args, "run_id", None)
     if want:
         ev = m.events(run=want)
         if not ev:
@@ -339,7 +419,7 @@ def cmd_graft(repo_root, args):
     """graft status / build / ask — the code-graph context layer."""
     cfg, _ = build(repo_root)
     target = (cfg["graft"].get("repo") or "").strip() or repo_root
-    action = getattr(args, "graft_action", "status")
+    action = getattr(args, "sub", "status")
 
     if action == "build":
         deep = getattr(args, "deep", False)
@@ -358,10 +438,11 @@ def cmd_graft(repo_root, args):
 
     # status
     st = graftctx.status(target)
-    print("graft: %s" % ("installed" if st["installed"] else "NOT INSTALLED"))
-    print("graph: %s" % ("built" if st["graph"] else "missing (run: graft build)"))
-    print("repo:  %s" % target)
-    print("enabled in config: %s" % cfg["graft"].get("enabled"))
+    enabled = bool(cfg["graft"].get("enabled"))
+    print("graft CLI:  %s" % ("installed" if st["installed"] else "not on PATH"))
+    print("graph here: %s" % ("built" if st["graph"] else "not built"))
+    print("repo:       %s" % target)
+    print("in prompts: %s" % ("ON" if enabled else "OFF (config [graft] enabled)"))
     if st["installed"] and st["graph"]:
         m = graftctx.repo_map(target)
         if m:
@@ -369,8 +450,55 @@ def cmd_graft(repo_root, args):
             print(m[:1200])
     if not st["installed"]:
         print()
-        print("install: npm install -g @nanonets/graft")
-    return 0 if st["installed"] else 1
+        print("The CLI is optional — the run degrades to a plain prompt without it.")
+        print("  global: npm install -g @nanonets/graft")
+        print("  no install, same version: npx -y @nanonets/graft@0.28.1 <cmd>")
+    if enabled and not (st["installed"] and st["graph"]):
+        print()
+        print("Enabled in config but unusable: every step pays two failed")
+        print("subprocess calls for nothing. Set enabled = false, or build.")
+        return 1
+    return 0
+
+
+def cmd_drakon(repo_root, args):
+    """The control machine, and the DRAKON silhouette drawn from it.
+
+    `drakon`          print the silhouette as text + where the SVG lives
+    `drakon --svg P`  write the SVG silhouette to P
+    `drakon check`    prove the machine is sound and the picture is honest
+    """
+    import statemachine as sm
+
+    action = getattr(args, "sub", "status") or "status"
+    problems = sm.validate() + sm.silhouette_problems()
+
+    if action == "check":
+        if problems:
+            print("%d problem(s):" % len(problems))
+            for p in problems:
+                print("  !! %s" % p)
+            return 1
+        print("ok — %s" % sm.summary())
+        print("   every state reachable, every state can reach a terminal,")
+        print("   every branch in the silhouette exists in the table")
+        return 0
+
+    out = getattr(args, "svg", None)
+    if out:
+        path = sm.write_svg(out)
+        print("wrote %s" % path)
+        return 0
+
+    print(sm.ascii_art())
+    print()
+    print(sm.summary())
+    if problems:
+        print()
+        for p in problems:
+            print("  !! %s" % p)
+        return 1
+    return 0
 
 
 def cmd_self_test(repo_root, args):
@@ -389,10 +517,19 @@ def cmd_self_test(repo_root, args):
         print("  none available -> %s (ai_Pobisk still runs)"
               % cfg["fallback"]["on_meta_unavailable"])
     print()
+    print("control machine:")
+    import statemachine as sm
+    problems = sm.validate() + sm.silhouette_problems()
+    if problems:
+        for p in problems:
+            print("  !! %s" % p)
+    else:
+        print("  %s — sound, silhouette matches the table" % sm.summary())
+    print()
     print("tasks:")
     tasks, skipped = dispatcher.load_tasks(repo_root, cfg)
     print("  %d task(s), %d skipped" % (len(tasks), len(skipped)))
-    return 0 if tasks else 1
+    return 0 if tasks and not problems else 1
 
 
 def cmd_run(repo_root, args):
@@ -499,33 +636,55 @@ def main():
         prog="ai_Pobisk.sh", description="supervisor for CLI AI agents")
     ap.add_argument("command", nargs="?", default="run",
                     choices=["run", "list", "status", "skills", "self-test",
-                             "graft", "watch", "check", "serve", "report"])
+                             "graft", "watch", "check", "serve", "report",
+                             "tail", "drakon"])
     ap.add_argument("--task", help="run only this task file name")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan, do not call any model")
     ap.add_argument("--fresh", action="store_true",
                     help="ignore saved state and start over")
     ap.add_argument("--quiet", action="store_true")
-    # `graft` sub-verb: build | ask <question> | status (default)
-    ap.add_argument("graft_action", nargs="?", default="status")
+    # Sub-verb for `graft` (build | ask | status) and `drakon` (check).
+    ap.add_argument("sub", nargs="?", default="status")
     ap.add_argument("query", nargs="*", default=[])
     ap.add_argument("--deep", action="store_true",
                     help="graft build --deep (adds LLM summaries, needs a key)")
+    ap.add_argument("--svg", metavar="PATH",
+                    help="drakon: write the silhouette as SVG to PATH")
     ap.add_argument("--live", action="store_true",
                     help="status: aggregate the current run's events")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--interval", type=float, default=5.0,
                     help="watch refresh seconds")
+    ap.add_argument("--lines", type=int, default=20,
+                    help="tail: how many events to show")
+    ap.add_argument("--follow", action="store_true",
+                    help="tail: keep printing new events (like tail -f)")
     ap.add_argument("--port", type=int, default=9099, help="serve port")
+    ap.add_argument("--run", dest="run_id", metavar="ID",
+                    help="report: which run to break down")
+    ap.add_argument("--notify-cmd", dest="notify_cmd", metavar="CMD",
+                    help="check: shell command to run when a threshold fires")
     ap.add_argument("--probe", action="store_true",
                     help="skills: really ping each model (spends one ask each)")
+    # Legacy spellings from План.md, kept so old notes still work.
+    ap.add_argument("--list", dest="flag_list", action="store_true",
+                    help="alias for the `list` command")
+    ap.add_argument("--self-test", dest="flag_self_test", action="store_true",
+                    help="alias for the `self-test` command")
     args = ap.parse_args()
+
+    if args.flag_list:
+        args.command = "list"
+    if args.flag_self_test:
+        args.command = "self-test"
 
     repo_root = os.environ.get("AI_POBISK_ROOT") or _ROOT
     fn = {"run": cmd_run, "list": cmd_list, "status": cmd_status,
           "skills": cmd_skills, "self-test": cmd_self_test,
           "graft": cmd_graft, "watch": cmd_watch, "check": cmd_check,
-          "serve": cmd_serve, "report": cmd_report}[args.command]
+          "serve": cmd_serve, "report": cmd_report, "tail": cmd_tail,
+          "drakon": cmd_drakon}[args.command]
     return fn(repo_root, args)
 
 

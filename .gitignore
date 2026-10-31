@@ -24,3 +24,6 @@ __pycache__/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# Assistant session notes — per-machine working log, not project source.
+.workbuddy-ai/

@@ -123,16 +123,27 @@ max_pending = 3
 owner_timeout_sec = 600
 
 # ── Code-graph context (Graft) ────────────────────────────────────────────────
-# Prepends a ranked code-graph context + repo map to every worker prompt, so the
-# model starts with a map instead of re-exploring the repo. Measured by Graft:
-# ~42% fewer tokens, ~46% fewer tool calls, ~60% less time, equal correctness.
+# Graft maps a repo into a folder of linked markdown cards, and ai_Pobisk can
+# prepend a short map to the worker prompt so it starts oriented instead of
+# exploring from scratch. Their benchmark: ~42% fewer tokens, ~46% fewer tool
+# calls. That number is from their repo, not from here — measure before trusting.
 #
-# `graft build` and every read command are deterministic tree-sitter: no model,
-# no key, no network. Safe to leave on. If graft is missing or graft/ is not
-# built, the prompt is passed through untouched.
+# OFF BY DEFAULT, for three measured reasons:
+#   1. The tasks point at igrasu.ru: 19 GB, 53 505 files. A graph there is not
+#      a prompt prefix, it is a project; and graft/ is not gitignored there, so
+#      it would litter a repo that is not ours.
+#   2. `graft ask` indexes identifiers and English prose. Russian questions
+#      return zero hits (measured), and every task file here is Russian — so
+#      the expensive half of the integration is a guaranteed miss.
+#   3. It is the only non-stdlib dependency in the project. "Clone and run"
+#      beats a maybe-42% on a repo that has no graph.
+#
+# Turn it on for a small, English-language repo you own:
+#   enabled = true, then `./ai_Pobisk.sh graft build` in that repo.
+# Missing CLI or missing graph degrades to a plain prompt — never an error.
 [graft]
-enabled = true
-# Which repo to map. "" = this project; point it at the task's target repo.
+enabled = false
+# Which repo to map. "" = the repo the task names in its body, else this one.
 repo = ""
 # Cap on the prepended block, in characters.
 max_context_chars = 4000

@@ -18,6 +18,7 @@ never a dependency.
 
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -46,8 +47,36 @@ def available():
 
 
 def has_graph(repo_root):
-    """Is there a built graph in this repo?"""
-    return os.path.isdir(os.path.join(repo_root, "graft"))
+    """Is there a *built* graph in this repo?
+
+    Checking for a directory named `graft/` is not enough: any stray folder
+    with that name made `graft status` report "graph: built" while the CLI was
+    missing entirely. The real artefacts are `.graph/wiring.json` and
+    `INDEX.md`, so require one of those.
+    """
+    base = os.path.join(repo_root, "graft")
+    return (os.path.isfile(os.path.join(base, ".graph", "wiring.json"))
+            or os.path.isfile(os.path.join(base, "INDEX.md")))
+
+
+_LATIN = re.compile(r"[A-Za-z]")
+_CYRILLIC = re.compile(r"[\u0400-\u04FF]")
+
+
+def mostly_latin(text):
+    """Is this query worth sending to a symbol index?
+
+    `graft ask` matches identifiers and prose written in English. Measured on
+    this repo: a Russian question ("как супервизор решает сменить модель")
+    returns zero hits, while the same question in English returns eight with
+    exact file:line. The task files here are Russian, so running `ask` on them
+    is a guaranteed-empty subprocess call on every step — skip it instead.
+    A query counts as Latin only when Latin letters outnumber Cyrillic ones;
+    "интегрирован Graft" is still a Russian question.
+    """
+    lat = len(_LATIN.findall(text or ""))
+    cyr = len(_CYRILLIC.findall(text or ""))
+    return lat > cyr and lat > 0
 
 
 def build(repo_root, deep=False, extensions=None, timeout=300):
@@ -124,9 +153,13 @@ def context_for(repo_root, prompt, cfg=None):
     if not available() or not has_graph(repo_root):
         return ""
     parts = []
-    a = ask(repo_root, prompt[:300])
-    if a:
-        parts.append(a)
+    # Only ask the index when the question is in the language it indexes.
+    # A Cyrillic query is a guaranteed miss, and a miss still costs a
+    # subprocess call on every step.
+    if mostly_latin(prompt):
+        a = ask(repo_root, prompt[:300])
+        if a:
+            parts.append(a)
     m = repo_map(repo_root)
     if m:
         parts.append("Repository map:\n" + m)

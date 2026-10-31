@@ -24,6 +24,21 @@ class Task:
     def empty(self):
         return not self.body.strip()
 
+    @property
+    def subtitle(self):
+        """A human label for logs.
+
+        Task files often have no `# heading`, so the title falls back to the
+        file name and the log reads "task 03 добавка.md: 03 добавка.md". Use
+        the first line of the body instead — that is the actual instruction.
+        """
+        if self.title and self.title != self.name:
+            return self.title
+        for line in self.body.splitlines():
+            if line.strip():
+                return line.strip()
+        return self.title
+
     def steps(self):
         """One step per task for now: the whole body as one instruction."""
         return [self.body.strip()] if self.body.strip() else []
@@ -85,7 +100,7 @@ def describe(tasks, skipped):
     if tasks:
         out.append("tasks:")
         for t in tasks:
-            out.append("  %-28s %s" % (t.name, t.title[:60]))
+            out.append("  %-28s %s" % (t.name, t.subtitle[:60]))
     if skipped:
         out.append("skipped:")
         for s in skipped:

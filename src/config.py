@@ -41,7 +41,9 @@ DEFAULTS = {
         "max_pending": 3,
         "owner_timeout_sec": 600,
     },
-    "graft": {"enabled": True, "repo": "", "max_context_chars": 4000},
+    # Off by default: the integration only pays off on a small repo that
+    # actually has a built graph. See configs/ai_pobisk.toml for the reasoning.
+    "graft": {"enabled": False, "repo": "", "max_context_chars": 4000},
     "parallel": {"enabled": True, "max_parallel_tasks": 3,
                  "same_repo_guard": True},
     "logs": {"max_bytes": 1_000_000, "keep": 3, "journal_max_bytes": 2_000_000},

@@ -88,7 +88,7 @@ class Journal:
                  "meta: %s" % (meta_status.get("model") or "rules only"),
                  "", "## tasks", ""]
         for t in tasks:
-            lines.append("- %s — %s" % (t.name, t.title))
+            lines.append("- %s — %s" % (t.name, t.subtitle))
         for s in skipped:
             lines.append("- (skipped) %s" % s)
         lines.append("")

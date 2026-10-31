@@ -157,3 +157,22 @@ The skill name 'nvidia' should match the folder name 'NVIDIA'. Значит ну
 Нужно както интегрировать в проект cd ~/Documents/GitHub/_Different/AI/WkBdy2api && ./scripts/start-local.sh - модели workbuddy я настроил в opencode.
 
 Не понял: 19 запаркованных моделей cline — это накопилось за время экспериментов, когда я гонял прогоны с разными поломанными конфигурациями. Сейчас живая одна. Можно сбросить через python3 .agents/skills/_shared/model-stats.py reset cline, чтобы ротация снова работала по полному списку.
+
+2026-09-21 16-11-21
+Почеу не стал работать
+michaelpopov@Mac-mini-Michael AI-Pobisk-Commander % ./ai_Pobisk.sh
+selecting meta model...
+  meta model: nvidia / nvidia/nemotron-3-nano-omni-30b-a3b-reasoning (1204ms)
+parallel: all tasks target the same repo -> running serially
+task 03 добавка.md: 03 добавка.md
+  task 03 добавка.md: done
+
+task 04 SMM.md: 04 SMM.md
+  task 04 SMM.md: done
+
+=== summary
+  03 добавка.md                done
+  04 SMM.md                    done
+michaelpopov@Mac-mini-Michael AI-Pobisk-Commander % 
+
+

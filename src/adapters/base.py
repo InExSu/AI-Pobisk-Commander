@@ -9,6 +9,7 @@ Every adapter inherits `run(prompt, **kw)` and returns an Outcome.
 """
 
 import os
+import signal
 import subprocess
 import time
 
@@ -134,10 +135,30 @@ def _http_from(text):
 
 
 def run_cmd(argv, timeout=None, env=None):
-    """Run a command, return (rc, stdout, stderr). Never raises on non-zero."""
+    """Run a command, return (rc, stdout, stderr). Never raises on non-zero.
+
+    Runs the child in its own process group and kills the *group* on timeout.
+    `subprocess.run(timeout=...)` alone kills only the direct child — which for
+    these skills is a bash wrapper — leaving the real agent (node cline, an
+    opencode TUI) alive and unsupervised, still editing the repository. That
+    turns one timed-out step into two agents writing to the same tree.
+    """
     e = os.environ.copy()
     if env:
         e.update(env)
-    p = subprocess.run(argv, capture_output=True, text=True,
-                       timeout=timeout, env=e)
-    return p.returncode, p.stdout or "", p.stderr or ""
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, env=e, start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p.returncode, out or "", err or ""
+    except subprocess.TimeoutExpired:
+        # Take the whole tree down: the wrapper, the agent, its children.
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except Exception:
+            p.kill()
+        try:
+            out, err = p.communicate(timeout=10)
+        except Exception:
+            out, err = "", ""
+        return 124, out or "", (err or "") + "\ntimed out after %ss" % timeout

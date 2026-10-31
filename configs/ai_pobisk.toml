@@ -60,7 +60,12 @@ min_step_ms = 2000
 # Per-step wall clock. A real agent (cline/opencode) reads files, runs tests
 # and edits code: 10 min is a normal task, not a hang. The 600s default was
 # cutting real work off mid-flight and reporting it as a model failure.
-step_timeout_sec = 1800
+#
+# 2 hours, because a task on igrasu.ru (19 GB, 53k files) is not "a normal
+# task": integrating one game took 30+ minutes of exploration alone, and the
+# 1800s cap cut it mid-integration. The overall run is still bounded by
+# max_wall_clock_sec above, so a genuinely hung model cannot run forever.
+step_timeout_sec = 7200
 
 # ── Concurrency ───────────────────────────────────────────────────────────────
 # Tasks are independent markdown files, so several can run at once — but only

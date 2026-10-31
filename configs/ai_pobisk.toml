@@ -54,6 +54,11 @@ max_iterations_per_step = 40
 # How many times to answer a confirmation prompt before giving up. A model
 # looping on "Press Enter" would otherwise be nudged forever.
 max_nudges_per_step = 5
+# When every worker in the list is out, the supervisor lifts transient
+# cooldowns and walks the list again — a model in a 15-minute cooldown is not
+# a dead fleet. `auth_error` stays parked. This caps that search: two rounds,
+# then `exhausted`, so a genuinely dead fleet cannot spin.
+max_rediscoveries = 2
 # Attempts faster than this are configuration failures (missing binary, bad
 # path), not real work — the supervisor paces them instead of spinning.
 min_step_ms = 2000

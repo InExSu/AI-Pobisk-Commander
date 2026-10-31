@@ -97,10 +97,14 @@ done
 
 # subcommand: register an account (dispatched below, after function definitions)
 
-FREE_MODELS_DEFAULT="opencode/mimo-v2.5-free opencode/ling-3.0-flash-fin-free \
-opencode/nemotron-3-ultra-free opencode/nemotron-3.5-lightning-free \
-opencode/muse-spark-1.3-contributor-free opencode/muse-spark-1.2-contributor-free \
-opencode/jev-1.13-free"
+# Free tier rotates its catalogue: `opencode models --standalone | grep free`
+# is the source of truth (re-probed 2026-10-31). The previous list —
+# mimo-v2.5-free, ling-3.0-flash-fin-free, nemotron-3-ultra-free, jev-1.13-free
+# — no longer exists and made every probe fail with "Model unavailable".
+FREE_MODELS_DEFAULT="opencode/beam-free opencode/deepseek-v4.1-flash-free \
+opencode/flint-40b-free opencode/glm-5.3-flash-free \
+opencode/mimo-v2.6-flash-free opencode/nemotron-3.5-lightning-free \
+opencode/nemotron-3.5-super-vl-free"
 MODELS="${OC_MODELS:-$FREE_MODELS_DEFAULT}"
 PROBE_TIMEOUT="${OC_PROBE_TIMEOUT:-25}"
 
@@ -109,7 +113,9 @@ DEAD_PATTERNS='FreeUsageLimitError|GoUsageLimitError|Free limit reached|Usage li
 RETRYABLE_RE='Internal server error|statusCode.*5[0-9][0-9]|isRetryable'
 # Credential failures: retrying never fixes them, so the circuit breaker parks
 # the model instead of counting it as a transient failure.
-AUTH_PATTERNS='Invalid API key|not authenticated|Unauthorized|No payment method|payment method here'
+# "API key has expired" is the one opencode prints when the key itself is dead —
+# without it the run burns its whole retry budget on an account that cannot work.
+AUTH_PATTERNS='Invalid API key|API key has expired|key has expired|not authenticated|Unauthorized|No payment method|payment method here'
 
 run_isolated() { # $1=acct_dir, rest=argv — run opencode with full isolation
   local d="$1"; shift
@@ -129,7 +135,11 @@ run_isolated() { # $1=acct_dir, rest=argv — run opencode with full isolation
 
 check_pair() { # $1=acct_dir $2=model_id -> prints answer, rc=0 if alive
   local out
-  out=$(run_isolated "$1" run -m "$2" "Reply with exactly: ok" 2>&1)
+  # --standalone: a private server per run instead of the shared background
+  # service. The shared one keeps a fixed port (49374); a stale instance, or
+  # two probes at once, makes every model look dead with "port already in use"
+  # — and the service also shells out to `ps`, which sandboxed hosts deny.
+  out=$(run_isolated "$1" run --standalone -m "$2" "Reply with exactly: ok" 2>&1)
   local rc=$?
   printf '%s' "$out"
   [ $rc -eq 0 ] || return 1
@@ -214,17 +224,30 @@ INTERACTIVE=0
 [ -n "$PROMPT" ] || [ "$LIST" = 1 ] || INTERACTIVE=1
 
 # ---- collect accounts (dirs with auth.json), sorted by mtime desc (recent wins) ----
+# Sorted in python, not `find -exec stat -f '%m %N'`: in some environments the
+# stat reached through -exec is GNU, where -f means "filesystem" — the pipeline
+# then yields block sizes and "apfs" instead of paths, every account name
+# becomes a number, and the skill reports its whole catalogue as DEAD while a
+# perfectly valid auth.json sits on disk. python3 is already a dependency.
 accounts=()
 if [ -d "$CFG" ]; then
-  while IFS= read -r f; do
-    rel="${f#"$CFG"/}"          # <name>/data/opencode/auth.json
-    accounts+=("${rel%%/*}")
-  done < <(find "$CFG" -mindepth 4 -maxdepth 4 -path '*/data/opencode/auth.json' -type f \
-           -exec stat -f '%m %N' {} \; 2>/dev/null | sort -rn | awk '{print $NF}')
-fi
-# de-dup, keep order
-if [ "${#accounts[@]}" -gt 0 ]; then
-  mapfile -t accounts < <(printf '%s\n' "${accounts[@]}" | awk '!seen[$0]++')
+  while IFS= read -r name; do
+    [ -n "$name" ] && accounts+=("$name")
+  done < <(python3 - "$CFG" <<'PY'
+import os, sys
+root = sys.argv[1]
+rows = []
+for name in os.listdir(root):
+    p = os.path.join(root, name, "data", "opencode", "auth.json")
+    try:
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            rows.append((os.path.getmtime(p), name))
+    except OSError:
+        pass
+for _, name in sorted(rows, reverse=True):
+    print(name)
+PY
+)
 fi
 
 [ "${#accounts[@]}" -gt 0 ] || die "no accounts in $CFG (add one: $0 --add-account NAME KEY)"
@@ -341,5 +364,5 @@ if [ "$INTERACTIVE" = 1 ]; then
   exit $?
 fi
 log "run: model=$MODEL account=$ACCOUNT prompt=$(printf '%s' "$PROMPT" | head -c 80)"
-run_isolated "$D" run -m "$MODEL" "$PROMPT"
+run_isolated "$D" run --standalone -m "$MODEL" "$PROMPT"
 

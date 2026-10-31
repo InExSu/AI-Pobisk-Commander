@@ -153,9 +153,14 @@ class Supervisor:
             "max_nudges": int(self.cfg["budget"].get("max_nudges_per_step", 5)),
             "fatal_floor": float(self.cfg["fallback"]["fatal_confidence_floor"]),
             "n_workers": len(self.worker_order),
+            # How many times the supervisor may re-open the fleet before it
+            # accepts that there are no hands left.
+            "max_rediscoveries": int(
+                self.cfg["budget"].get("max_rediscoveries", 2)),
         }
 
         iters = 0
+        rediscoveries = 0
         while True:
             iters += 1
             counters = {
@@ -169,6 +174,16 @@ class Supervisor:
 
             # ── pre-call guards: no worker is hired when the run is out ──────
             d = sm.guard(counters, budgets)
+            if (d and d.state == sm.EXHAUSTED_ST
+                    and rediscoveries < budgets["max_rediscoveries"]):
+                # "No workers left" is a claim about the list we just walked,
+                # not about the fleet: most of it is usually sitting in a
+                # 15-minute cooldown. Lift the pauses, then walk it again.
+                rediscoveries += 1
+                if self._find_hands(name, idx):
+                    worker_idx = 0
+                    model = None
+                    continue
             if d:
                 self._say("  step %d: %s" % (idx, d.reason))
                 return d.result
@@ -272,6 +287,31 @@ class Supervisor:
             return "loop_guard"
 
     # ── helpers ───────────────────────────────────────────────────────────────
+    def _find_hands(self, task_name, idx):
+        """Lift transient cooldowns and look at the fleet again.
+
+        Returns the number of models made reachable. `auth_error` entries are
+        left parked on purpose — a bad key does not heal by waiting — so a
+        fleet that is genuinely broken still ends in `exhausted`.
+        """
+        try:
+            import hands
+            revived = hands.revive(hands.HEALTH_STORE, self.worker_order)
+        except Exception as e:
+            self._say("    hands: lookup failed (%s)" % type(e).__name__)
+            return 0
+        n = sum(revived.values())
+        if n:
+            # Start model rotation from the top of the catalogue again; the
+            # old tried-set only remembers models this step already burned.
+            self._tried.clear()
+            self.journal.event(
+                "hands: revived %d model(s) in %s"
+                % (n, ", ".join(sorted(revived))),
+                etype="hands", task=task_name, step=idx, revived=n)
+            self._say("    все воркеры вышли — ищу руки заново: %d моделей" % n)
+        return n
+
     def _pace(self, outcome):
         """Sleep when attempts come back implausibly fast.
 

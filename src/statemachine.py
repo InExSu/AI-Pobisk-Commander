@@ -111,6 +111,11 @@ TRANSITIONS = [
     # the backstops that make every other rule safe to be wrong about
     (DISPATCH, "budget=iterations", LOOP_ST, "жёсткий предел итераций"),
     (DISPATCH, "budget=no_workers", EXHAUSTED_ST, "воркеры кончились"),
+    # …but "no workers" is checked once more after looking for hands: a model
+    # in a 15-minute cooldown is not a dead fleet, and the supervisor is
+    # allowed to lift the cooldown and walk the list again.
+    (DISPATCH, "hands=revived", DISPATCH, "сняли кулдауны, идём по кругу"),
+    (DISPATCH, "hands=none", EXHAUSTED_ST, "рук действительно больше нет"),
 ]
 
 # Every state that is not a terminal must have an exit.
@@ -326,6 +331,9 @@ TRUNK = [
     ("branch", "итераций > предела?", [
         ("terminal", "loop_guard")]),
     ("branch", "воркеры остались?", [
+        ("action", "искать руки: снять кулдауны, сбросить tried"),
+        ("branch", "нашли?", [
+            ("address", "dispatch")]),
         ("terminal", "exhausted")]),
     ("branch", "outcome = ok?", [
         ("terminal", "ok")]),
@@ -372,6 +380,7 @@ ADDRESSES = {
 _BRANCH_EVENT = {
     "итераций > предела?": ("dispatch", "budget=iterations", "loop_guard"),
     "воркеры остались?": ("dispatch", "budget=no_workers", "exhausted"),
+    "нашли?": ("dispatch", "hands=revived", "dispatch"),
     "outcome = ok?": ("evaluate", "outcome=ok", "ok"),
     "инвариант сработал?": ("evaluate", "invariant=rotate_model", "rotate_model"),
     "outcome = waiting?": ("evaluate", "outcome=waiting", "nudge"),

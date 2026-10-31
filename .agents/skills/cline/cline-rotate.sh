@@ -22,6 +22,9 @@
 #   CLINE_LOG_DIR       where to write cline-rotate.log (default: $CLINE_ACCOUNTS_DIR/../logs)
 #   AI_ROTATE_DIR       shared model-health store     (default: ~/.ai-rotate)
 #   CLINE_NO_STATS=1    ignore the shared store, keep the file order
+#   CLINE_SAVE_MODEL=1  persist the winning model into providers.json (default: off;
+#                      the run already pins -m explicitly, so off avoids clobbering
+#                      the per-account model you set by hand)
 
 set -uo pipefail
 
@@ -199,6 +202,24 @@ is_model_limit() {
 		[[ "$out" == *"today's free usage limit"* ]] ||
 		[[ "$out" == *"INFERENCE_CAP_ERROR"* ]] ||
 		[[ "$out" == *"Free model promotion ended"* ]]
+}
+
+# The account, not the model, is out: no credit, revoked key, hard quota.
+# Rotating the model inside this account cannot help — only another --data-dir.
+# Returns 0 (true) => switch account.
+is_account_failure() {
+	local out="$1"
+	[[ "$out" == *"402"* ]] ||
+		[[ "$out" == *"credit"* ]] ||
+		[[ "$out" == *"Credit"* ]] ||
+		[[ "$out" == *"wallet"* ]] ||
+		[[ "$out" == *"401"* ]] ||
+		[[ "$out" == *"403"* ]] ||
+		[[ "$out" == *"Unauthorized"* ]] ||
+		[[ "$out" == *"Invalid API key"* ]] ||
+		[[ "$out" == *"key has expired"* ]] ||
+		[[ "$out" == *"quota"* ]] ||
+		[[ "$out" == *"Quota"* ]]
 }
 
 # ── Rotation order ────────────────────────────────────────────────────────────
@@ -385,7 +406,11 @@ while true; do
 	fi
 
 	# ── Run the real task on the working model ─────────────────────────────────
-	save_model "$ACCOUNT_DIR" "$model"
+	# save_model persists the winning model back into providers.json. It is OFF
+	# by default: the script always passes -m explicitly, so persisting only
+	# risks clobbering the per-account model the user deliberately configured.
+	# Opt in with CLINE_SAVE_MODEL=1 if you want a "sticky winner" next time.
+	[[ "${CLINE_SAVE_MODEL:-0}" == "1" ]] && save_model "$ACCOUNT_DIR" "$model"
 
 	local_args=(--auto-approve true --retries "$CLINE_RETRIES" --data-dir "$ACCOUNT_DIR")
 	[[ "$MODE" == "plan" ]] && local_args+=(-p)
@@ -413,11 +438,33 @@ while true; do
 
 	printf '%s\n' "$OUT"
 	if [[ $RC -ne 0 ]]; then
-		clog "  done   rc=$RC model=$model"
+		clog "  done   rc=$RC model=$model account=$ACCOUNT_NAME"
 		stats_record "$model" fail "" "run rc=$RC"
-	else
-		clog "  done   rc=0 model=$model"
-		stats_record "$model" ok ""
+
+		# The run failed. Do NOT end the whole invocation here: this account is
+		# one of several --data-dir trees, and the next one may well work.
+		# Switch account, keep the prompt, try again — bounded by
+		# MAX_ACCOUNT_ROUNDS so five dead accounts still end in a clear exit.
+		((MAX_ACCOUNT_ROUNDS -= 1))
+		if ((MAX_ACCOUNT_ROUNDS <= 0)); then
+			clog "ABORT: all ${#ACCOUNTS[@]} account(s) tried, none finished the task"
+			echo "cline-rotate: all accounts exhausted" >&2
+			exit 5
+		fi
+		if is_account_failure "$OUT"; then
+			clog "  account [$ACCOUNT_NAME] is out (credit/key/quota) -> next --data-dir"
+		else
+			clog "  run failed on [$ACCOUNT_NAME] -> next --data-dir"
+		fi
+		# A new account starts with a clean model slate: the previous account's
+		# dead models say nothing about this one.
+		GLOBAL_DEAD+=("$model|$ACCOUNT_NAME")
+		DEAD_MODELS=()
+		ACCOUNT_IDX=$(((ACCOUNT_IDX + 1) % ${#ACCOUNTS[@]}))
+		continue
 	fi
-	exit "$RC"
+
+	clog "  done   rc=0 model=$model account=$ACCOUNT_NAME"
+	stats_record "$model" ok ""
+	exit 0
 done

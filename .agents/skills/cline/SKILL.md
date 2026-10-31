@@ -128,9 +128,18 @@ where the human is watching and ready to `/model` by hand, plain `cline` is fine
 | ---------------------------------------- | --------------------------------------------- |
 | Model prints the daily-limit banner      | next model in the rotation                    |
 | All models exhausted on one account      | next account in `~/.cline/accounts`           |
-| Account-level failure (auth/other error) | skip the whole account, don't burn models     |
+| Task run returns non-zero on a good model| next account (`--data-dir`), bounded by `MAX_ACCOUNT_ROUNDS`; never exits early |
+| Account-level failure (402/credit/quota) | skip the whole account, don't burn models     |
 | All accounts exhausted                   | exit 5, log `ABORT: all accounts exhausted`   |
 | Loop guard tripped                       | exit 4, never spins forever                   |
+
+The real task runs with **`--auto-approve true --retries 12 --data-dir <account>`**
+(the retry count is `CLINE_RETRIES`, default 12). Critically, a non-zero return
+from the task no longer ends the whole run: the supervisor switches to the next
+`--data-dir` and retries the same prompt, so a dead account hands off to a live
+one instead of failing the task. `MAX_ACCOUNT_ROUNDS` (default: one full sweep of
+the account list) bounds how many accounts are tried before the run reports
+exhaustion with exit 5.
 
 Exit codes: `0` task ok · `1` task failed (propagated from cline) · `3` no
 accounts found · `4` loop guard · `5` all accounts exhausted. An interactive
@@ -176,8 +185,10 @@ PY
 ## Loop-safety invariants (do not break these)
 
 1. **Probing must never mutate state.** Probes run with `--auto-approve false
-   --retries 1 --timeout 45` and a throwaway prompt; only the winning model is
-   written into `providers.json`.
+   --retries 1 --timeout 45` and a throwaway prompt. The winning model is
+   persisted into `providers.json` **only** when `CLINE_SAVE_MODEL=1` is set
+   (off by default): the supervisor always passes `-m` explicitly, so persisting
+   would only risk clobbering the per-account model you configured by hand.
 2. **Two independent guards against infinite rotation**: a per-invocation attempt
    counter (`accounts × models + 5`) and `CLINE_MAX_ACCOUNT_ROUNDS` (default: one
    full sweep of the account list). Reaching either is a hard exit, never a retry.

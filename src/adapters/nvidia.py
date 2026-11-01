@@ -48,7 +48,7 @@ class NvidiaAdapter(Adapter):
             # and exits 0. classify() knows that shape and reports
             # rotate_account; for a normal answer it returns ok.
             return classify(text, skill=self.skill, model=model or "",
-                            account=account or "", elapsed_ms=ms)
+                            account=account or "", elapsed_ms=ms, rc=rc)
         if rc == 2:
             return Outcome(FATAL, self.skill, model or "", account or "",
                            "no NVIDIA API key in the secret store", None, ms, text)
@@ -56,7 +56,7 @@ class NvidiaAdapter(Adapter):
             return Outcome(ROTATE_MODEL, self.skill, model or "", account or "",
                            "all NVIDIA models dead", None, ms, text)
         return classify(text, skill=self.skill, model=model or "",
-                        account=account or "", elapsed_ms=ms)
+                        account=account or "", elapsed_ms=ms, rc=rc)
 
     def models(self):
         try:

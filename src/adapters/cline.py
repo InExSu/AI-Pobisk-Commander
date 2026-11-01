@@ -61,4 +61,4 @@ class ClineAdapter(Adapter):
         # rc 1 = task failed; let classify decide whether it is retryable
         from classify import classify
         return classify(text, skill=self.skill, model=used_model,
-                        account=used_account, elapsed_ms=ms)
+                        account=used_account, elapsed_ms=ms, rc=rc)

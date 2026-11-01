@@ -59,7 +59,8 @@ def _skill_health(repo_root, cfg, adapters):
                          or os.path.expanduser("~/.ai-rotate"),
                          "model-stats.json")
     try:
-        stats = _json.load(open(store))
+        with open(store) as _f:
+            stats = _json.load(_f)
     except Exception:
         stats = {}
 
@@ -870,6 +871,27 @@ def _run_tasks(repo_root, cfg, tasks, sv, args):
     return results
 
 
+def cmd_issues(repo_root, args):
+    """Pull GitHub issues into task files (see scripts/sync_issues.py)."""
+    if not args.repo:
+        print("issues: --repo owner/name is required", file=sys.stderr)
+        return 2
+    out_dir = args.out or os.path.join(repo_root, "configs", "tasks")
+    sys.path.insert(0, os.path.join(repo_root, "scripts"))
+    import sync_issues
+    try:
+        created, skipped = sync_issues.sync(
+            args.repo, project_dir=args.dir, label=args.label or None,
+            state=args.state, limit=args.limit, issue=args.issue or None,
+            out_dir=out_dir, dry_run=args.dry_run)
+    except RuntimeError as e:
+        print("issues: %s" % e, file=sys.stderr)
+        return 1
+    print("\nissues: %d created, %d skipped" % (created, skipped))
+    print("run them with: ./ai_Pobisk.sh --fresh")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog="ai_Pobisk.sh", description="supervisor for CLI AI agents")
@@ -877,7 +899,7 @@ def main():
                     choices=["run", "list", "status", "skills", "self-test",
                              "graft", "watch", "check", "serve", "report",
                              "tail", "drakon", "mail", "signup", "login",
-                             "repair"])
+                             "repair", "issues"])
     ap.add_argument("--task", help="run only this task file name")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan, do not call any model")
@@ -907,6 +929,21 @@ def main():
                     help="check: shell command to run when a threshold fires")
     ap.add_argument("--probe", action="store_true",
                     help="skills: really ping each model (spends one ask each)")
+    # ── issues (GitHub intake) ───────────────────────────────────────────────
+    ap.add_argument("--repo", default="",
+                    help="issues: owner/name of the GitHub repo to pull")
+    ap.add_argument("--dir", default="",
+                    help="issues: local checkout dir (sets Work-in-directory)")
+    ap.add_argument("--label", default="",
+                    help="issues: only issues carrying this label")
+    ap.add_argument("--state", default="open",
+                    help="issues: open|closed|all")
+    ap.add_argument("--limit", type=int, default=10,
+                    help="issues: max issues to pull in list mode")
+    ap.add_argument("--issue", type=int, default=0,
+                    help="issues: pull a single issue number")
+    ap.add_argument("--out", default="",
+                    help="issues: output dir for task files")
     # ── mail / signup ─────────────────────────────────────────────────────────
     ap.add_argument("--wait", type=float, default=0.0,
                     help="mail: block up to SEC seconds waiting for a new code")
@@ -952,7 +989,8 @@ def main():
           "graft": cmd_graft, "watch": cmd_watch, "check": cmd_check,
           "serve": cmd_serve, "report": cmd_report, "tail": cmd_tail,
           "drakon": cmd_drakon, "mail": cmd_mail, "signup": cmd_signup,
-          "login": cmd_login, "repair": cmd_repair}[args.command]
+          "login": cmd_login, "repair": cmd_repair,
+          "issues": cmd_issues}[args.command]
     return fn(repo_root, args)
 
 

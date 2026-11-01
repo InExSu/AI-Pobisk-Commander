@@ -32,6 +32,7 @@ DEFAULTS = {
         "min_step_ms": 2000,
         "max_nudges_per_step": 5,
         "max_iterations_per_step": 40,
+        "max_no_evidence_per_step": 3,
         # Times the supervisor may lift transient cooldowns and walk the whole
         # worker list again before accepting that there are no hands left.
         "max_rediscoveries": 2,

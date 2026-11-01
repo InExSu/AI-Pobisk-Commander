@@ -51,6 +51,11 @@ max_steps_per_task = 50
 # rotations can both ask for "try again"; this bounds them so a wrong verdict
 # costs a bounded amount instead of hanging the run.
 max_iterations_per_step = 40
+# A model that reports ok but leaves the target repo unchanged ("done" after
+# only analysing) gets the step re-dispatched to the NEXT model this many
+# times before the step is flagged needs_review for the owner. One live run
+# halted a task on the first fake "done" while the rest of the fleet was idle.
+max_no_evidence_per_step = 3
 # How many times to answer a confirmation prompt before giving up. A model
 # looping on "Press Enter" would otherwise be nudged forever.
 max_nudges_per_step = 5

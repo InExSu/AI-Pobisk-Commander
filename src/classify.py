@@ -132,10 +132,18 @@ WAITING_PATTERNS = re.compile(
     re.I)
 
 # Signals that the model stopped to ask something rather than to fail.
+# Russian is a first-class citizen here: workers answer in the project's
+# language, and a question in Russian that scored `ok` once stalled a task
+# in needs_review while its answer sat in the project's own AGENTS.md.
+# The Russian imperative/interrogative alternatives are NOT anchored to the
+# line start: the model's final message usually sits mid-transcript.
 QUESTION_PATTERNS = re.compile(
     r"^\s*(which|what|should (i|we)|do you (want|prefer)|"
     r"can you (clarify|confirm|choose)|please (clarify|confirm|choose|specify))"
-    r"\b|\?\s*$",
+    r"\b|\?\s*$"
+    r"|\b(уточните|укажите|подтвердите|выберите|напишите|скажите)\b"
+    r"|\b(какой|какая|какие|какую|каком|каким)\s+(issue|иссюе|задач|файл|путь|модель|вариант|подход)"
+    r"|\b(что именно|нужно ли|стоит ли|можно ли|требуется ли)\b",
     re.I | re.M)
 
 
@@ -170,11 +178,16 @@ def set_no_filesystem(skills=None, patterns=None):
 
 
 def classify(text, http=None, skill="", model="", account="", elapsed_ms=0,
-             no_fs_skills=None):
+             no_fs_skills=None, rc=None):
     """Map raw output + HTTP code to an Outcome.
 
     HTTP code is consulted when present: it is more reliable than prose, which
     is why it is checked before the text rules.
+
+    `rc` is the skill's exit code when the caller has it. Only one thing is
+    inferred from it — a KILLED worker — because that is the one failure whose
+    right answer is unambiguous: the model had its whole timeout and had to be
+    terminated, so retrying it repeats the hang.
 
     `no_fs_skills` lists skills that are bare chat completions with no file
     tools. For those, "I cannot access your files" is not an answer — it is a
@@ -197,6 +210,18 @@ def classify(text, http=None, skill="", model="", account="", elapsed_ms=0,
         return Outcome(WAITING, skill, model, account,
                        "blocked on a confirmation prompt",
                        http, elapsed_ms, text)
+
+    # A worker that had to be KILLED is a model fault, not bad luck. rc < 0
+    # means a signal (stall guard / watchdog terminated a silent worker);
+    # 124 is run_cmd's own timeout killer. The prose below ("timed out …")
+    # would otherwise file the same event as `retry` — and the supervisor
+    # would re-hire the very model that just hung for a whole step_timeout.
+    # One live run lost hours to exactly that loop.
+    if rc is not None and (rc < 0 or rc == 124):
+        why = "killed by timeout" if rc == 124 else "killed by signal %d" % rc
+        return Outcome(ROTATE_MODEL, skill, model, account,
+                       "worker %s (rc %d) — model fault, rotating"
+                       % (why, rc), http, elapsed_ms, text)
 
     # A missing binary / broken invocation. This never fixes itself by
     # retrying, and it fails in milliseconds — without this check the
@@ -247,7 +272,10 @@ def classify(text, http=None, skill="", model="", account="", elapsed_ms=0,
         return Outcome(RETRY, skill, model, account,
                        "empty response", http, elapsed_ms, text)
 
-    if QUESTION_PATTERNS.search(stripped) and len(stripped) < 600:
+    # 2000, not 600: a real CLI transcript carries tool logs before the
+    # model's final words, and one live question ("какой issue проработать?")
+    # drowned in that noise and scored `ok` at the old cap.
+    if QUESTION_PATTERNS.search(stripped) and len(stripped) < 2000:
         return Outcome(QUESTION, skill, model, account,
                        _brief(stripped), http, elapsed_ms, text)
 

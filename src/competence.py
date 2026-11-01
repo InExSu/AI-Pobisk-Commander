@@ -18,6 +18,33 @@ import re
 MAX_SOURCE_BYTES = 400_000      # don't read the whole repo into a prompt
 MAX_SNIPPET = 1200
 
+# ── Task selection is the supervisor's OWN competence ─────────────────────────
+# "Which issue should I work on?" is not a question to forward to the owner:
+# the supervisor is the dispatcher, and its standing rule is "work the queue
+# top-down, production bugs and agent-ready items first". One live run (task
+# «03 Иссуес.md», 2026-11-01) escalated exactly this question to the owner and
+# stalled in needs_review, while the project's AGENTS.md said plainly:
+# "работаешь до пустой очереди: цикл PR → Issues → деплой".
+TASK_SELECTION_RE = re.compile(
+    r"как(ой|ую|ие|им)\s[^.?\n]{0,40}(issue|иссюе|задач|тикет)"
+    r"|which\s+(issue|task|ticket)\b"
+    r"|уточните[^.?\n]{0,60}(issue|иссюе|задач)"
+    r"|(issue|иссюе)[^.\n]{0,30}(проработать|взять|выбрать|делать)",
+    re.I)
+
+TASK_SELECTION_ANSWER = (
+    "Do not ask which issue/task to work on — that choice is ai_Pobisk's, "
+    "not the owner's. Pick the highest-priority OPEN issue yourself "
+    "(production bugs and `agent-ready` labels first), follow the project's "
+    "AGENTS.md, and start working now. If the open queue is genuinely empty "
+    "or objectively blocked (no access/money/data), say so, finish, and "
+    "report what you checked."
+)
+
+
+def _is_task_selection(question):
+    return bool(TASK_SELECTION_RE.search(question or ""))
+
 
 def _sources(repo_root, cfg):
     """Load the files listed in questions.auto_answer_from."""
@@ -84,6 +111,14 @@ def answer_question(repo_root, cfg, meta, question, journal, task_name):
     """
     if not question:
         return None
+
+    # 0. Deterministic competence: choosing WHAT to work on belongs to the
+    #    supervisor, so it never costs a source scan, a meta call, or the
+    #    owner's attention.
+    if _is_task_selection(question):
+        journal.event("question: task selection — supervisor's own "
+                      "competence, answered without the owner")
+        return TASK_SELECTION_ANSWER
 
     floor = float(cfg["questions"]["ask_owner_when_confidence_below"])
     max_pending = int(cfg["questions"]["max_pending"])

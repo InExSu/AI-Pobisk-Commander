@@ -12,6 +12,7 @@ import os
 import re
 import signal
 import subprocess
+import threading
 import time
 
 HEALTH_STORE = os.path.join(
@@ -32,6 +33,18 @@ HEALTH_STORE = os.path.join(
 ATTR_MARK = "pobisk-attr:"
 _ATTR_RE = re.compile(
     r"pobisk-attr:\s*model=(?P<model>\S*)\s+account=(?P<account>\S*)")
+
+# Per-thread cwd the supervisor sets before hiring a worker. A process-wide
+# PB_TARGET_DIR export cannot work under parallel tasks: two threads running
+# different tasks would overwrite each other's target and an agent could be
+# pointed at the WRONG repository. os.environ has no per-thread scope; a
+# thread-local does.
+_tls = threading.local()
+
+
+def set_target_dir(path):
+    """Set the cwd run_cmd() uses in THIS thread (None clears it)."""
+    _tls.target_dir = path or None
 
 
 def parse_attribution(text):
@@ -105,13 +118,16 @@ class Adapter:
         # end up on a different model than the one it was asked to use.
         used_model, used_account = self._attribution(text, model, account)
         o = classify(text, http=_http_from(text), skill=self.skill,
-                     model=used_model, account=used_account, elapsed_ms=ms)
+                     model=used_model, account=used_account, elapsed_ms=ms,
+                     rc=rc)
 
         # rc != 0 with no recognised error pattern is a real failure, not a
         # success: the skill gave up but we could not say why. A stall-guard or
         # timeout kill leaves the worker's own "stalled"/"timeout" marker in the
         # output — name it, so the journal shows the model was killed for
-        # silence rather than "exited with no recognised error".
+        # silence rather than "exited with no recognised error". (Kills are
+        # already rotated inside classify() when it sees rc; this branch only
+        # catches a kill whose rc shape classify could not have seen.)
         if rc not in (0,) and o.outcome == "ok":
             from outcome import Outcome, RETRY
             reason = "exit %d with no recognised error" % rc
@@ -243,7 +259,7 @@ def _http_from(text):
     return int(m.group(1)) if m else None
 
 
-def run_cmd(argv, timeout=None, env=None):
+def run_cmd(argv, timeout=None, env=None, cwd=None):
     """Run a command, return (rc, stdout, stderr). Never raises on non-zero.
 
     Runs the child in its own process group and kills the *group* on timeout.
@@ -251,12 +267,22 @@ def run_cmd(argv, timeout=None, env=None):
     these skills is a bash wrapper — leaving the real agent (node cline, an
     opencode TUI) alive and unsupervised, still editing the repository. That
     turns one timed-out step into two agents writing to the same tree.
+
+    `cwd` lets a file-step worker actually run INSIDE the target project, so the
+    agent edits the project and not ai_Pobisk's own tree. When `cwd` is not
+    given, fall back to the thread-local target (set by the supervisor per
+    step — safe under parallel tasks, unlike a shared environment variable),
+    then to ``PB_TARGET_DIR``, else the caller's working directory.
     """
     e = os.environ.copy()
     if env:
         e.update(env)
+    run_cwd = (cwd or getattr(_tls, "target_dir", None)
+               or e.get("PB_TARGET_DIR") or None)
+    if run_cwd:
+        run_cwd = os.path.expanduser(run_cwd) or None
     p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         text=True, env=e, start_new_session=True)
+                         text=True, env=e, start_new_session=True, cwd=run_cwd)
     try:
         out, err = p.communicate(timeout=timeout)
         return p.returncode, out or "", err or ""

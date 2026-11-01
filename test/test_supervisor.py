@@ -123,6 +123,23 @@ class RepoEditingFake(Fake):
         return super().run(prompt, model=model, account=account, timeout=timeout)
 
 
+class LazyThenWorkingFake(Fake):
+    """First attempt(s) report ok WITHOUT touching the repo — the weak model
+    that analysed and called it done; later attempts do the real edit."""
+
+    def __init__(self, seq, repo):
+        super().__init__(seq)
+        self.repo = repo
+        self.calls = 0
+
+    def run(self, prompt, model=None, account=None, timeout=None):
+        self.calls += 1
+        if self.calls > 1:
+            with open(os.path.join(self.repo, "seed.txt"), "a") as fh:
+                fh.write("edited by worker\n")
+        return super().run(prompt, model=model, account=account, timeout=timeout)
+
+
 class TestEvidence(unittest.TestCase):
     """A file step that reports ok but leaves the target repo unchanged is a
     false positive — a weak model that returned rc=0 having done nothing."""
@@ -157,6 +174,52 @@ class TestEvidence(unittest.TestCase):
         res = sv.run_step(t, 1, "prompt")
         self.assertEqual(res, "ok")
         self.assertFalse(sv._no_evidence)
+
+    def test_lazy_ok_rotates_and_next_model_finishes(self):
+        # One live run (2026-11-01): a model returned rc=0 "done" having only
+        # ANALYSED the repo. needs_review halted the task while every other
+        # model in the fleet was healthy. Bounded rotation must give the step
+        # to the next model first.
+        repo = _git_repo()
+        if repo is None:
+            self.skipTest("git not available")
+        root = tempfile.mkdtemp()
+        j = J.Journal(root, CFG); j.reset()
+        f = LazyThenWorkingFake(["ok", "ok"], repo)
+        m = M.Meta(root, CFG, {"fake": f}); m.model = None
+        sv = S.Supervisor(root, CFG, {"fake": f}, m, j, verbose=False)
+        sv.worker_order = ["fake"]
+        body = "edit %s/ and commit" % repo
+        t = dispatcher.Task(os.path.join(root, "t.md"), "t", body, 1)
+        res = sv.run_step(t, 1, "prompt")
+        self.assertEqual(res, "ok")
+        self.assertFalse(sv._no_evidence)
+        # the second attempt ran on a DIFFERENT model, and the lazy first
+        # attempt is visible in the journal
+        self.assertEqual(len(f.seen), 2)
+        self.assertNotEqual(f.seen[0], f.seen[1])
+        self.assertGreaterEqual(j.attempts(t.name).get("no_evidence", 0), 1)
+
+    def test_lazy_ok_budget_runs_out_to_needs_review(self):
+        # Every model keeps faking "done": after the no-evidence budget the
+        # step stops for a human — the loop must terminate.
+        repo = _git_repo()
+        if repo is None:
+            self.skipTest("git not available")
+        root = tempfile.mkdtemp()
+        j = J.Journal(root, CFG); j.reset()
+        f = Fake(["ok"] * 50)                        # never edits, always ok
+        m = M.Meta(root, CFG, {"fake": f}); m.model = None
+        sv = S.Supervisor(root, CFG, {"fake": f}, m, j, verbose=False)
+        sv.worker_order = ["fake"]
+        body = "edit %s/ and commit" % repo
+        t = dispatcher.Task(os.path.join(root, "t.md"), "t", body, 1)
+        res = sv.run_step(t, 1, "prompt")
+        self.assertEqual(res, "needs_review")
+        self.assertTrue(sv._no_evidence)
+        # and the fleet was actually rotated, not stopped on attempt one
+        self.assertGreaterEqual(j.attempts(t.name).get("no_evidence", 0),
+                                3)
 
 
 class TestStatus(unittest.TestCase):

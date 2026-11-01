@@ -10,6 +10,7 @@ must not restart from zero because the terminal closed.
 
 import json
 import os
+import threading
 import time
 
 
@@ -21,6 +22,11 @@ class Journal:
         self.state_path = os.path.join(self.dir, cfg["state"]["state_file"])
         self.journal_path = os.path.join(self.dir, cfg["state"]["journal"])
         os.makedirs(self.dir, exist_ok=True)
+        # Parallel tasks share one Journal (and one state.json), so every
+        # read-modify-write must be atomic against the other threads. One
+        # live run lost two of three tasks to exactly this: two threads
+        # saved at once and one os.replace found the shared tmp file gone.
+        self._lock = threading.RLock()
         self.state = self._load()
 
     # ── state ─────────────────────────────────────────────────────────────────
@@ -34,40 +40,53 @@ class Journal:
         return {"tasks": {}, "started": time.time(), "updated": time.time()}
 
     def save(self):
-        self.state["updated"] = time.time()
-        tmp = self.state_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.state, f, indent=2, sort_keys=True)
-        os.replace(tmp, self.state_path)
+        with self._lock:
+            self.state["updated"] = time.time()
+            # The tmp name is unique per process AND per thread: two writers
+            # sharing one fixed tmp path race — writer A's os.replace moves
+            # the file away, writer B then replaces a file that no longer
+            # exists and dies with FileNotFoundError. Unique names + the
+            # atomic os.replace make concurrent saves safe.
+            tmp = "%s.%d.%d.tmp" % (self.state_path, os.getpid(),
+                                    threading.get_ident())
+            with open(tmp, "w") as f:
+                json.dump(self.state, f, indent=2, sort_keys=True)
+            os.replace(tmp, self.state_path)
 
     def task_state(self, name):
-        return self.state["tasks"].setdefault(
-            name, {"status": "pending", "step": 0, "attempts": {},
-                   "notes": [], "finished": None})
+        with self._lock:
+            return self.state["tasks"].setdefault(
+                name, {"status": "pending", "step": 0, "attempts": {},
+                       "notes": [], "finished": None})
 
     def mark(self, name, status, step=None, note=None):
-        t = self.task_state(name)
-        t["status"] = status
-        if step is not None:
-            t["step"] = step
-        if note:
-            t["notes"].append("%s %s" % (_ts(), note))
-        if status in ("done", "failed", "skipped"):
-            t["finished"] = time.time()
-        self.save()
+        with self._lock:
+            t = self.task_state(name)
+            t["status"] = status
+            if step is not None:
+                t["step"] = step
+            if note:
+                t["notes"].append("%s %s" % (_ts(), note))
+            if status in ("done", "failed", "skipped"):
+                t["finished"] = time.time()
+            self.save()
 
     def note(self, name, text):
-        self.task_state(name)["notes"].append("%s %s" % (_ts(), text))
-        self.save()
+        with self._lock:
+            self.task_state(name)["notes"].append("%s %s" % (_ts(), text))
+            self.save()
 
     def bump(self, name, key):
-        t = self.task_state(name)
-        t["attempts"][key] = t["attempts"].get(key, 0) + 1
-        self.save()
-        return t["attempts"][key]
+        with self._lock:
+            t = self.task_state(name)
+            t["attempts"][key] = t["attempts"].get(key, 0) + 1
+            self.save()
+            return t["attempts"][key]
 
     def attempts(self, name):
-        return self.task_state(name)["attempts"]
+        with self._lock:
+            return self.task_state(name)["attempts"]
+
 
     # ── journal.md ────────────────────────────────────────────────────────────
     def write_header(self, tasks, skipped, meta_status):

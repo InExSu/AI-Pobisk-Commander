@@ -25,6 +25,7 @@ import os
 import sys
 import time
 import json
+import threading
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -75,6 +76,11 @@ def _target_dir_from_task(task):
     if not m:
         return None
     p = m.group(1)
+    # realpath/abspath so "repo/" and "repo" and "repo/./" are ONE directory:
+    # same_repo_guard compares these strings to decide serial-vs-parallel, and
+    # a trailing slash once defeated it — three tasks landed on one repo at
+    # the same time.
+    p = os.path.realpath(os.path.abspath(os.path.expanduser(p)))
     if os.path.isdir(p):
         return p
     parent = os.path.dirname(p)
@@ -146,6 +152,11 @@ class _Status:
     be able to break a run.
     """
 
+    # One status file, many task threads (parallel run): serialize the
+    # read-merge-write cycle, or two threads interleave and the last writer
+    # silently drops the other's update.
+    _lock = threading.Lock()
+
     def __init__(self, status_dir):
         self.dir = status_dir
         self.path = os.path.join(status_dir, "status.json")
@@ -153,20 +164,25 @@ class _Status:
     def write(self, last_activity, **kw):
         try:
             os.makedirs(self.dir, exist_ok=True)
-            cur = {}
-            if os.path.exists(self.path):
-                try:
-                    with open(self.path) as f:
-                        cur = json.load(f)
-                except Exception:
-                    cur = {}
-            cur.update(kw)
-            cur["last_activity"] = last_activity
-            cur["updated_at"] = time.time()
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(cur, f, indent=2)
-            os.replace(tmp, self.path)
+            with self._lock:
+                cur = {}
+                if os.path.exists(self.path):
+                    try:
+                        with open(self.path) as f:
+                            cur = json.load(f)
+                    except Exception:
+                        cur = {}
+                cur.update(kw)
+                cur["last_activity"] = last_activity
+                cur["updated_at"] = time.time()
+                # Unique tmp per writer: same reasoning as Journal.save — a
+                # fixed name turns concurrent writes into FileNotFoundError
+                # or a torn read on the observer's side.
+                tmp = "%s.%d.%d.tmp" % (self.path, os.getpid(),
+                                        threading.get_ident())
+                with open(tmp, "w") as f:
+                    json.dump(cur, f, indent=2)
+                os.replace(tmp, self.path)
         except Exception:
             pass
 
@@ -450,6 +466,15 @@ class Supervisor:
                                            " (%s)" % model if model else ""))
             prompt = self._with_context(task, step)
             prompt = self._with_cwd(task, prompt)
+            # Run the worker INSIDE the target project (if this task names one),
+            # so the agent edits the project and not ai_Pobisk's own tree. The
+            # target is per-THREAD, not per-process: two tasks in parallel set
+            # different targets, and a shared os.environ export let task A's
+            # export point task B's worker at A's repository.
+            target = (self.cfg.get("graft") or {}).get("repo") \
+                or _target_dir_from_task(task)
+            import base as _adapter_base
+            _adapter_base.set_target_dir(target or None)
             # Count the attempt before it starts: if the worker dies mid-call
             # the counter must already know an attempt happened. This key was
             # never bumped before, so every attempt event in the journal
@@ -507,15 +532,42 @@ class Supervisor:
                 # A file step that reports ok but leaves the target repo
                 # byte-for-byte as it found it (HEAD and working tree
                 # unchanged) is a weak model that returned rc=0 having done
-                # no work. Do not let that count as success: flag it for a
-                # human and report non-success so the task does not claim a
-                # step it never actually performed. The check is skipped when
-                # baseline is None — a non-git target we cannot fingerprint
-                # is never falsely accused.
+                # no work. Not fatal, and not final either: one live run
+                # stalled in needs_review while every other model in the
+                # fleet was healthy. The step goes to the NEXT model/worker
+                # (bounded by max_no_evidence_per_step); only when the budget
+                # runs out does it escalate to a human. The check is skipped
+                # when baseline is None — a non-git target we cannot
+                # fingerprint is never falsely accused.
                 if (d.result == "ok" and is_file_step
                         and baseline is not None):
                     after = _repo_snapshot(target_dir)
                     if after == baseline:
+                        no_ev = self.journal.bump(name, "no_evidence")
+                        max_no_ev = int(
+                            self.cfg["budget"].get(
+                                "max_no_evidence_per_step", 3))
+                        if no_ev <= max_no_ev:
+                            self.journal.event(
+                                "evidence: ok без работы (%s) — ротация, "
+                                "попытка %d/%d" % (target_dir, no_ev,
+                                                   max_no_ev),
+                                etype="evidence", task=name, step=idx,
+                                skill=skill, attempt_no=no_ev)
+                            self._say("    evidence: шаг %d вернул ok, но "
+                                      "репозиторий %s не изменился — "
+                                      "другая модель (%d/%d)"
+                                      % (idx, target_dir, no_ev, max_no_ev))
+                            nxt = self._next_model(skill, o.model or model)
+                            model_rot += 1
+                            if model_rot > budgets["max_model_rot"] or not nxt:
+                                worker_idx += 1
+                                model = None
+                                model_rot = 0
+                            else:
+                                model = nxt
+                            self.journal.bump(name, "model")
+                            continue
                         self._no_evidence = True
                         self.journal.event(
                             "evidence: step %d reported ok but %s unchanged"
@@ -789,8 +841,14 @@ class Supervisor:
         """Ask competence.py whether ai_Pobisk can answer this itself."""
         try:
             from competence import answer_question
+            # The QUESTION outcome's detail is only the FIRST line of the
+            # transcript (often "done"); the actual question lives in the
+            # full text. One live run forwarded the word "done" to the
+            # competence check and escalated a task that needed no owner.
+            question = ((getattr(outcome, "text", "") or "").strip()
+                        or outcome.detail)
             return answer_question(self.repo_root, self.cfg, self.meta,
-                                   outcome.detail, self.journal, task.name)
+                                   question, self.journal, task.name)
         except Exception as e:
             self.journal.event("question handling failed: %s" % type(e).__name__)
             return None

@@ -45,7 +45,7 @@ class TokenHarborAdapter(Adapter):
             # Same trap as NVIDIA: rc 0 with "I cannot access your files" is a
             # capability gap, not a completed task. Let classify() decide.
             return classify(text, skill=self.skill, model=model or "",
-                            account=account or "", elapsed_ms=ms)
+                            account=account or "", elapsed_ms=ms, rc=rc)
         if rc == 2:
             return Outcome(FATAL, self.skill, model or "", account or "",
                            "no Token Harbor API key in the secret store",
@@ -54,7 +54,7 @@ class TokenHarborAdapter(Adapter):
             return Outcome(ROTATE_MODEL, self.skill, model or "", account or "",
                            "all Token Harbor models dead", None, ms, text)
         return classify(text, skill=self.skill, model=model or "",
-                        account=account or "", elapsed_ms=ms)
+                        account=account or "", elapsed_ms=ms, rc=rc)
 
     def models(self):
         try:

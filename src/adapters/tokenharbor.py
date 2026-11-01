@@ -15,6 +15,8 @@ from outcome import Outcome, FATAL, ROTATE_MODEL
 class TokenHarborAdapter(Adapter):
     skill = "tokenharbor"
     script = ".agents/skills/tokenharbor/tokenharbor-rotate.sh"
+    # tokenharbor-rotate.sh records every call into the shared store.
+    script_records_health = True
     # Same shape as NVIDIA: `tokenharbor-rotate.sh` posts to
     # https://tokenharbor.ai/v1/chat/completions. A completion call, not an
     # agent — no tools, no filesystem.

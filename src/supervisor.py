@@ -256,7 +256,12 @@ class Supervisor:
         self._recover_if_crashed(name)
         self.status.write(self._status_last_activity, state="running", task=name,
                           run_pid=os.getpid(), started_at=time.time(),
-                          current_step=0, step_state="idle")
+                          current_step=0, step_state="idle",
+                          # A previous run's finish time and verdict describe
+                          # a run that is over. Carrying them into a live run
+                          # makes status.json claim the task finished before
+                          # it started.
+                          finished_at=None, last_result=None)
 
         started = time.time()
         wall = int(self.cfg["budget"]["max_wall_clock_sec"])
@@ -438,6 +443,12 @@ class Supervisor:
                                            " (%s)" % model if model else ""))
             prompt = self._with_context(task, step)
             prompt = self._with_cwd(task, prompt)
+            # Count the attempt before it starts: if the worker dies mid-call
+            # the counter must already know an attempt happened. This key was
+            # never bumped before, so every attempt event in the journal
+            # carried a permanent attempt_no of 0 and "which try was this?"
+            # had no answer.
+            attempt_no = self.journal.bump(name, "attempt")
             o = a.run(prompt, model=model,
                       timeout=int(self.cfg["budget"].get("step_timeout_sec", 600)))
             self._pace(o)
@@ -452,12 +463,15 @@ class Supervisor:
             # _next_model() then walks the catalogue from the top.
             if not model and o.model:
                 model = o.model
+            # Publish the model that served. status.json is the only window an
+            # outside observer has into a run that lasts minutes per step.
+            self.status.write(self._status_last_activity,
+                              model=o.model or model or "")
             self.journal.event(
                 "%s -> %s: %s" % (skill, o.outcome, o.detail[:100]),
                 etype="attempt", task=name, step=idx, skill=skill,
-                model=model or "", outcome=o.outcome, http=o.http,
-                elapsed_ms=o.elapsed_ms,
-                attempt_no=attempts.get("attempt", 0))
+                model=o.model or model or "", outcome=o.outcome, http=o.http,
+                elapsed_ms=o.elapsed_ms, attempt_no=attempt_no)
 
             # ── the machine decides ──────────────────────────────────────────
             d = sm.decide(o, counters, budgets)

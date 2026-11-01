@@ -15,6 +15,9 @@ from base import Adapter, run_cmd
 class OpenCodeAdapter(Adapter):
     skill = "opencode"
     script = ".agents/skills/opencode/opencode-rotate.sh"
+    # opencode-rotate.sh records every probe and every run into the shared
+    # store.
+    script_records_health = True
 
     def _invoke(self, prompt, model=None, account=None, timeout=None):
         argv = [self.script_path]

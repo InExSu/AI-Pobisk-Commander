@@ -398,11 +398,31 @@ except Exception:
 		return 1
 	fi
 	if [[ $rc -ne 0 ]]; then
-		clog "  probe  model=$model account=$email -> ERROR rc=$rc"
-		clog "         account-level failure, skipping whole account"
-		# A non-limit error is an account/credential problem, not a model one.
-		stats_record "$model" auth "$elapsed" "$(printf '%s' "$out" | tail -1)"
-		return 2
+		# A failed probe says very little about the MODEL. The credential
+		# belongs to the ACCOUNT, and the probe itself can die on its own
+		# 45s timeout or on a provider hiccup.
+		#
+		# Recording `auth` here parked the model for 24h, and after three
+		# such parks for good. That is how 8 of cline's 13 models ended up
+		# in auth_error — including one with 14 successful calls — and the
+		# whole fleet collapsed onto a single model. `fail` is transient:
+		# the model keeps its rotation slot, and the breaker still opens
+		# after three honest strikes.
+		local why
+		why="$(printf '%s' "$out" | tail -1)"
+		if is_account_failure "$out"; then
+			# The account is unusable, so skip it for this run. The model
+			# is not implicated and must not be parked because of it.
+			clog "  probe  model=$model account=$email -> ACCOUNT DEAD rc=$rc"
+			clog "         account-level failure, skipping whole account"
+			stats_record "$model" fail "$elapsed" "account dead: $why"
+			return 2
+		fi
+		# Only this model failed to answer. Rotate the model, keep the
+		# account — the credential answered moments ago.
+		clog "  probe  model=$model account=$email -> ERROR rc=$rc (transient)"
+		stats_record "$model" fail "$elapsed" "probe rc=$rc: $why"
+		return 1
 	fi
 	clog "  probe  model=$model account=$email -> OK (${elapsed}ms)"
 	stats_record "$model" ok "$elapsed"
@@ -523,6 +543,14 @@ while true; do
 	[[ -n "$SESSION_ID" ]] && local_args+=(--id "$SESSION_ID")
 	[[ ${#EXTRA_ARGS[@]} -gt 0 ]] && local_args+=("${EXTRA_ARGS[@]}")
 	local_args+=(-m "$model")
+
+	# Machine-readable attribution. The Python supervisor cannot see inside
+	# this script, so without this line the journal's `model` column stays
+	# empty, the health store never learns which model answered, and a
+	# rotation has no real starting point. The marker is a dedicated one on
+	# purpose: the agent's own answer is printed to the same stdout and may
+	# contain the words "model=" or "account=".
+	clog "pobisk-attr: model=$model account=$ACCOUNT_NAME"
 
 	# Interactive: hand the terminal over to cline on a live model.
 	if [[ "$INTERACTIVE" == "1" ]]; then

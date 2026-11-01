@@ -45,6 +45,13 @@ except `record`):
     record   <skill> <model> <ok|fail|auth|limit> [latency_ms] [error_text]
              -> updates the store, prints one summary line on stderr.
 
+    repair   -> releases false parks: models parked as `auth_error` whose
+                recorded reason does not actually name a credential failure.
+                A park bans a model for a day, so a park caused by a provider
+                stream error, an empty balance or a timeout removes a working
+                model from rotation. Keeps the store honest after a writer
+                bug; prints what it released.
+
     show     [<skill>]   -> human table on stdout.
 
     reset    [<skill> [<model>]]
@@ -358,6 +365,58 @@ def cmd_order(argv):
     return 0
 
 
+# ── repair ───────────────────────────────────────────────────────────────────
+# A park means "this credential is broken" and bans the model for a day. The
+# rotate scripts used to park a model whenever a probe failed for ANY reason
+# — a provider stream error, an empty balance, a timeout. Those parks removed
+# working models from rotation: 8 of cline's 13 models sat in auth_error,
+# including one with 14 recorded successes, and the fleet collapsed onto a
+# single model.
+#
+# The repair keeps a park only when the recorded reason actually names a
+# credential failure. Everything else is released. These are the same markers
+# the Python side uses (adapters/base.py::_is_credential_failure) so the two
+# halves of the system agree on what "broken credential" means.
+CREDENTIAL_MARKERS = (
+    "credential rejected", "auth error", "invalid api key", "unauthorized",
+    "unauthenticated", "no authtoken", "no api key", "missing api key",
+    "not authenticated", "key has expired", "401", "403",
+)
+
+
+def is_credential_reason(text):
+    """True when the recorded reason names a broken credential."""
+    low = (text or "").lower()
+    return any(m in low for m in CREDENTIAL_MARKERS)
+
+
+def cmd_repair(argv):
+    """Release parks that were not caused by a broken credential."""
+    d = load()
+    released = 0
+    for skill, models in list((d or {}).items()):
+        if not isinstance(models, dict):
+            continue
+        for mid, e in list(models.items()):
+            if not isinstance(e, dict) or e.get("state") != "auth_error":
+                continue
+            if is_credential_reason(e.get("last_err")):
+                continue          # a genuine credential failure: keep it
+            e["state"] = "recovering"
+            e["cooldown_until"] = 0
+            e["fails"] = 0
+            # The park counter decides whether the model is dropped for good
+            # (AUTH_MAX_PARKS). A false park must not spend that budget.
+            e["parks"] = 0
+            released += 1
+            print("  repair  %s/%s released (park reason was not a "
+                  "credential failure)" % (skill, mid), file=sys.stderr)
+    if released:
+        save(d)
+    print("released %d false park(s)" % released)
+    return 0
+
+
 # ── show / reset ──────────────────────────────────────────────────────────────
 def cmd_show(argv):
     d = load()
@@ -402,7 +461,8 @@ def main():
         return 2
     cmd, argv = sys.argv[1], sys.argv[2:]
     fn = {"record": cmd_record, "order": cmd_order,
-          "show": cmd_show, "reset": cmd_reset}.get(cmd)
+          "show": cmd_show, "reset": cmd_reset,
+          "repair": cmd_repair}.get(cmd)
     if fn is None:
         print("model-stats: unknown subcommand %r" % cmd, file=sys.stderr)
         return 2

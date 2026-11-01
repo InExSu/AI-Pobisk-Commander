@@ -20,6 +20,8 @@ from outcome import Outcome, OK, ROTATE_ACCOUNT, FATAL, LOOP_GUARD
 class FreeBuffAdapter(Adapter):
     skill = "freebuff"
     script = ".agents/skills/freebuff/freebuff-rotate.sh"
+    # freebuff-rotate.sh records its quota probes into the shared store.
+    script_records_health = True
 
     def _invoke(self, prompt, model=None, account=None, timeout=None):
         # No prompt mode exists; `quota` is the only non-interactive call.

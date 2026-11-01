@@ -141,9 +141,12 @@ def summarize(events):
         if task:
             st = out["tasks"].setdefault(
                 task, {"status": "running", "attempts": 0, "retries": 0,
-                       "elapsed_ms": 0, "skill": e.get("skill", "")})
+                       "elapsed_ms": 0, "skill": e.get("skill", ""),
+                       "model": e.get("model", "")})
             if e.get("skill"):
                 st["skill"] = e["skill"]
+            if e.get("model"):
+                st["model"] = e["model"]
         if t == "attempt":
             out["attempts"] += 1
             oc = e.get("outcome", "?")

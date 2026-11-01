@@ -139,6 +139,27 @@ def cmd_skills(repo_root, args):
     return 0 if ok else 1
 
 
+def cmd_repair(repo_root, args):
+    """Release model-health parks that were not caused by a broken credential.
+
+    A park bans a model from rotation for a day. The rotate scripts used to
+    park a model whenever a probe failed for any reason at all — a provider
+    stream error, an empty balance, a timeout — and those false parks quietly
+    shrank the fleet until only one model was left. This command releases
+    them, keeping the parks whose reason really does name a credential.
+    """
+    import importlib.util
+    shared = os.path.join(repo_root, ".agents", "skills", "_shared",
+                          "model-stats.py")
+    if not os.path.exists(shared):
+        print("model-stats.py not found at %s" % shared, file=sys.stderr)
+        return 1
+    spec = importlib.util.spec_from_file_location("model_stats_repair", shared)
+    ms = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ms)
+    return ms.cmd_repair([])
+
+
 def cmd_list(repo_root, args):
     cfg, _ = build(repo_root)
     tasks, skipped = dispatcher.load_tasks(repo_root, cfg)
@@ -230,7 +251,8 @@ def cmd_watch(repo_root, args):
                       % ("task", "skill", "model", "status", "elapsed"))
                 for name, t in sorted(summ["tasks"].items()):
                     print("%-26s %-12s %-22s %-10s %.0fs"
-                          % (name[:26], t.get("skill", "-")[:12], "-",
+                          % (name[:26], t.get("skill", "-")[:12],
+                             t.get("model", "-")[:22],
                              t.get("status", "running"), t.get("elapsed_ms", 0) / 1000.0))
                 print()
                 print("attempts %d · retries %d · nudges %d · rotations %d"
@@ -854,7 +876,8 @@ def main():
     ap.add_argument("command", nargs="?", default="run",
                     choices=["run", "list", "status", "skills", "self-test",
                              "graft", "watch", "check", "serve", "report",
-                             "tail", "drakon", "mail", "signup", "login"])
+                             "tail", "drakon", "mail", "signup", "login",
+                             "repair"])
     ap.add_argument("--task", help="run only this task file name")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan, do not call any model")
@@ -929,7 +952,7 @@ def main():
           "graft": cmd_graft, "watch": cmd_watch, "check": cmd_check,
           "serve": cmd_serve, "report": cmd_report, "tail": cmd_tail,
           "drakon": cmd_drakon, "mail": cmd_mail, "signup": cmd_signup,
-          "login": cmd_login}[args.command]
+          "login": cmd_login, "repair": cmd_repair}[args.command]
     return fn(repo_root, args)
 
 

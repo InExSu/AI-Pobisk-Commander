@@ -17,6 +17,7 @@
 #   ./ai_Pobisk.sh graft [build|ask]    # code-graph context
 #   ./ai_Pobisk.sh mail [--wait 180]    # read the registration mailbox (IMAP)
 #   ./ai_Pobisk.sh signup URL [--yes]   # an AI fills a registration form
+#   ./ai_Pobisk.sh repair                # release false model-health parks
 #
 # Why bash: it resolves the repo root and execs python. All logic lives in
 # src/. Adding a key before launch works as usual:

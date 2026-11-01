@@ -116,7 +116,15 @@ RETRYABLE_RE='Internal server error|statusCode.*5[0-9][0-9]|isRetryable'
 # the model instead of counting it as a transient failure.
 # "API key has expired" is the one opencode prints when the key itself is dead —
 # without it the run burns its whole retry budget on an account that cannot work.
-AUTH_PATTERNS='Invalid API key|API key has expired|key has expired|not authenticated|Unauthorized|No payment method|payment method here'
+#
+# ONLY a broken credential belongs here. Billing ("No payment method") and quota
+# exhaustion are the ACCOUNT's wallet, not the model's character: parking the
+# model for them threw away working models and shrank the fleet to nothing.
+AUTH_PATTERNS='Invalid API key|API key has expired|key has expired|not authenticated|Unauthorized'
+# The account's wallet is empty or its quota is spent. The model is fine — it
+# just cannot be used with this account right now. Park it briefly (the
+# `limit` state), not for a day.
+QUOTA_PATTERNS='No payment method|payment method here|Quota exceeded|FreeUsageLimitError|GoUsageLimitError|Free limit reached|Usage limit reached|FreeTierError|CreditsError'
 
 run_isolated() { # $1=acct_dir, rest=argv — run opencode with full isolation
   local d="$1"; shift
@@ -271,6 +279,13 @@ probe_pair() {
     log "  auth failure on $m: ${why:-rc=$rc}"
     stats_record "$m" auth "$ms" "$why"
     return 2
+  fi
+  if printf '%s' "$out" | grep -Eq "$QUOTA_PATTERNS"; then
+    # The wallet is empty or the quota is spent: the account's problem, not
+    # the model's. Park it for minutes, not for a day.
+    log "  quota exhausted on $m: ${why:-rc=$rc}"
+    stats_record "$m" limit "$ms" "$why"
+    return 1
   fi
   log "  dead: ${why:-rc=$rc}"
   stats_record "$m" fail "$ms" "$why"
@@ -457,6 +472,13 @@ MODEL="$(pick_model)" || {
 
 log "chosen account=$ACCOUNT model=$MODEL"
 
+# Machine-readable attribution. The Python supervisor cannot see inside this
+# script, so without this line the journal's `model` column stays empty and a
+# rotation has no real starting point. The marker is a dedicated one on
+# purpose: the agent's own answer is printed to the same stream and may
+# contain the words "model=" or "account=".
+log "pobisk-attr: model=$MODEL account=$ACCOUNT"
+
 # ---- remember working pair ----
 python3 - "$STATE" "$ACCOUNT" "$MODEL" <<'PY'
 import json,sys
@@ -480,11 +502,39 @@ GUARD_PID=$!
 wait "$RUN_PID"
 RC=$?
 kill "$GUARD_PID" 2>/dev/null; wait "$GUARD_PID" 2>/dev/null
+RUN_OUT="$(cat "$OUT_FILE" 2>/dev/null)"
 cat "$OUT_FILE"
 rm -f "$OUT_FILE"
+
+# Record what the RUN actually did. Until now only the liveness probe
+# reached the shared store, so the health of a model was judged by whether it
+# could answer "ok" — and a model that passes every probe but fails the actual
+# task stayed "healthy" forever. The run is the signal that matters.
 if [ $RC -eq 143 ] || [ $RC -eq 137 ]; then
   log "run killed after ${STALL_WINDOW}s of silence — model is mute"
   echo "opencode-rotate: stalled ${STALL_WINDOW}s" >&2
+  stats_record "$MODEL" fail "" "stalled ${STALL_WINDOW}s"
+  exit $RC
+fi
+if [ $RC -eq 0 ] && printf '%s' "$RUN_OUT" | grep -Eq "$DEAD_PATTERNS"; then
+  # rc 0 but the provider printed a dead pattern (quota spent, model
+  # disabled): the run did not really succeed, and recording `ok` here
+  # would teach the store that a broken model is a healthy one.
+  DEAD_WHY="$(printf '%s' "$RUN_OUT" | grep -Eo "$DEAD_PATTERNS" | head -1)"
+  log "  run reported a dead pattern: $DEAD_WHY"
+  if printf '%s' "$RUN_OUT" | grep -Eq "$AUTH_PATTERNS"; then
+    stats_record "$MODEL" auth "" "$DEAD_WHY"
+  elif printf '%s' "$RUN_OUT" | grep -Eq "$QUOTA_PATTERNS"; then
+    stats_record "$MODEL" limit "" "$DEAD_WHY"
+  else
+    stats_record "$MODEL" fail "" "$DEAD_WHY"
+  fi
+  exit $RC
+fi
+if [ $RC -eq 0 ]; then
+  stats_record "$MODEL" ok ""
+else
+  stats_record "$MODEL" fail "" "run rc=$RC"
 fi
 exit $RC
 

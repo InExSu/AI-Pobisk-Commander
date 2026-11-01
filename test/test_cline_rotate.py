@@ -202,5 +202,92 @@ echo "done"; exit 0""")
         self.assertEqual(set(seen), {"airegist01"}, "account switched: %s" % seen)
 
 
+class TestProbeDoesNotParkModels(unittest.TestCase):
+    """A failed probe says very little about the MODEL.
+
+    The probe used to record `auth` for any non-limit error, and a park bans
+    a model for 24 hours. Eight of cline's thirteen models sat in auth_error
+    that way — including one with fourteen recorded successes — and the whole
+    fleet collapsed onto a single model. Every one of those parks was caused
+    by a provider stream error or an empty balance, never by a broken
+    credential.
+    """
+
+    def probe_fake(self, tmp, log, probe_body):
+        fake = os.path.join(tmp, "cline")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write("""#!/bin/sh
+prev=""
+case " $* " in *" --auto-approve true "*) run=1 ;; *) run=0 ;; esac
+for a in "$@"; do
+  [ "$run" = 1 ] && [ "$prev" = "--data-dir" ] && echo "$a" >> "%s"
+  prev="$a"
+done
+case " $* " in
+  *" --auto-approve false "*) %s ;;
+esac
+echo "Done: 3 files changed"; exit 0
+""" % (log, probe_body))
+        os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+        return fake
+
+    def store_of(self, tmp):
+        import json
+        p = os.path.join(tmp, "rotate", "model-stats.json")
+        if not os.path.exists(p):
+            return {}
+        return json.load(open(p))
+
+    def test_provider_error_does_not_park_the_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env, log, _ = make_env(tmp)
+            env.pop("CLINE_NO_STATS", None)   # the store must be written
+            env["CLINE_MODELS"] = "m1 m2"
+            # m1's probe dies with a provider stream error; m2's probe works.
+            fake = self.probe_fake(tmp, log, """
+case " $* " in
+  *" -m m2 "*) echo ok; exit 0 ;;
+esac
+echo "Failed to create stream: inference request failed"; exit 1""")
+            env["CLINE_BIN"] = fake
+            p = run(env)
+            store = self.store_of(tmp)
+            seen = tried(log)
+
+        e = store.get("cline", {}).get("m1")
+        self.assertIsNotNone(e, "the failed probe was not recorded at all")
+        self.assertNotEqual(e["state"], "auth_error",
+                            "a provider stream error must not park a model")
+        self.assertEqual(e["uptime"], [0, 1])
+        # The account is still usable: the model rotated, the account stayed.
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(set(seen), {"airegist01"}, "account switched: %s" % seen)
+
+    def test_broken_credential_still_skips_the_account(self):
+        # The one case that should end the account: the key itself is dead.
+        with tempfile.TemporaryDirectory() as tmp:
+            env, log, _ = make_env(tmp)
+            env.pop("CLINE_NO_STATS", None)
+            env["CLINE_MODELS"] = "m1"
+            fake = self.probe_fake(tmp, log,
+                                   'echo "Error: 401 Unauthorized"; exit 1')
+            env["CLINE_BIN"] = fake
+            p = run(env)
+            with open(os.path.join(tmp, "logs", "cline-rotate.log"),
+                      encoding="utf-8") as f:
+                rlog = f.read()
+
+        self.assertEqual(p.returncode, 5)
+        self.assertIn("unusable (auth/error), skipping", rlog)
+
+    def test_the_script_says_which_model_it_used(self):
+        # Without this the journal's model column stays empty and a rotation
+        # has no real starting point.
+        with tempfile.TemporaryDirectory() as tmp:
+            env, log, _ = make_env(tmp)
+            p = run(env)
+        self.assertIn("pobisk-attr: model=m1 account=", p.stdout + p.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

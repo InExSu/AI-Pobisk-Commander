@@ -19,6 +19,8 @@ from outcome import Outcome, OK, FATAL, LOOP_GUARD, ROTATE_ACCOUNT
 class ClineAdapter(Adapter):
     skill = "cline"
     script = ".agents/skills/cline/cline-rotate.sh"
+    # cline-rotate.sh records every probe and every run into the shared store.
+    script_records_health = True
 
     def _invoke(self, prompt, model=None, account=None, timeout=None):
         argv = [self.script_path]
@@ -37,23 +39,26 @@ class ClineAdapter(Adapter):
                             "adapter error: %s" % e)
         ms = int((time.time() - t0) * 1000)
         text = (out or "") + "\n" + (err or "")
+        # cline rotates models and accounts internally; the script reports the
+        # pair it actually used, which is the only reliable answer.
+        used_model, used_account = self._attribution(text, model, account)
 
         # cline's own exit codes are authoritative: it has already rotated
         # through every model and account it could before returning these.
         if rc == 0:
-            return Outcome(OK, self.skill, model or "", account or "",
+            return Outcome(OK, self.skill, used_model, used_account,
                            "done", None, ms, text)
         if rc == 3:
-            return Outcome(FATAL, self.skill, model or "", account or "",
+            return Outcome(FATAL, self.skill, used_model, used_account,
                            "no cline accounts configured", None, ms, text)
         if rc == 4:
-            return Outcome(LOOP_GUARD, self.skill, model or "", account or "",
+            return Outcome(LOOP_GUARD, self.skill, used_model, used_account,
                            "cline loop guard tripped", None, ms, text)
         if rc == 5:
-            return Outcome(ROTATE_ACCOUNT, self.skill, model or "",
-                           account or "", "cline: all accounts exhausted",
+            return Outcome(ROTATE_ACCOUNT, self.skill, used_model,
+                           used_account, "cline: all accounts exhausted",
                            None, ms, text)
         # rc 1 = task failed; let classify decide whether it is retryable
         from classify import classify
-        return classify(text, skill=self.skill, model=model or "",
-                        account=account or "", elapsed_ms=ms)
+        return classify(text, skill=self.skill, model=used_model,
+                        account=used_account, elapsed_ms=ms)

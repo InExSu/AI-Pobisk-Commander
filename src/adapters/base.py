@@ -9,6 +9,7 @@ Every adapter inherits `run(prompt, **kw)` and returns an Outcome.
 """
 
 import os
+import re
 import signal
 import subprocess
 import time
@@ -17,6 +18,36 @@ HEALTH_STORE = os.path.join(
     os.environ.get("AI_ROTATE_DIR") or os.path.expanduser("~/.ai-rotate"),
     "model-stats.json")
 
+# ── model attribution ────────────────────────────────────────────────────────
+# The rotate scripts pick the model themselves and say which one they used:
+#
+#     pobisk-attr: model=<id> account=<name>
+#
+# The Python side cannot see inside the script, so without this line the
+# journal's `model` column stays empty, the health store never learns which
+# model answered, and a rotation has no real starting point. The marker is a
+# dedicated one on purpose: the agent's own answer is printed to the same
+# stdout and may well contain the words "model=" or "account=" — only the
+# marker makes the line unambiguous.
+ATTR_MARK = "pobisk-attr:"
+_ATTR_RE = re.compile(
+    r"pobisk-attr:\s*model=(?P<model>\S*)\s+account=(?P<account>\S*)")
+
+
+def parse_attribution(text):
+    """(model, account) the skill reported it used, or ("", "").
+
+    The last marker line wins: the scripts log chronologically, so the final
+    marker names the model that served (or failed) the call.
+    """
+    model = account = ""
+    for line in (text or "").splitlines():
+        m = _ATTR_RE.search(line)
+        if m:
+            model = m.group("model") or ""
+            account = m.group("account") or ""
+    return model, account
+
 
 class Adapter:
     """Base class. Subclasses set `skill` and implement `_invoke`."""
@@ -24,6 +55,13 @@ class Adapter:
     skill = ""
     # Path to the skill's rotate script, relative to the repo root.
     script = ""
+    # Does this skill's own rotate script write to the shared health store?
+    # All five do. When it does, the adapter must stay silent: two writers for
+    # one call double the sample count, and one real failure becomes two
+    # strikes on a breaker that opens after three — so the fleet routes around
+    # a model that failed only once. The script knows the model; the adapter
+    # only guesses, so the script is the single writer.
+    script_records_health = False
     # Can this skill touch files on disk? Local CLI agents run a real agent
     # with file tools (read/grep/edit/shell), so yes. A bare chat-completion
     # API has no tools at all — it answers in prose and never opens the repo —
@@ -62,8 +100,12 @@ class Adapter:
 
         ms = int((time.time() - t0) * 1000)
         text = (out or "") + "\n" + (err or "")
+        # Which model/account actually served. The skill's own report wins over
+        # whatever the supervisor pinned: a skill that rotates internally may
+        # end up on a different model than the one it was asked to use.
+        used_model, used_account = self._attribution(text, model, account)
         o = classify(text, http=_http_from(text), skill=self.skill,
-                     model=model or "", account=account or "", elapsed_ms=ms)
+                     model=used_model, account=used_account, elapsed_ms=ms)
 
         # rc != 0 with no recognised error pattern is a real failure, not a
         # success: the skill gave up but we could not say why. A stall-guard or
@@ -78,13 +120,30 @@ class Adapter:
                 reason = "worker killed by stall guard (silent, rc %d)" % rc
             elif "timeout" in low or "timed out" in low:
                 reason = "worker killed by timeout (rc %d)" % rc
-            o = Outcome(RETRY, self.skill, model or "", account or "",
+            o = Outcome(RETRY, self.skill, used_model, used_account,
                         reason, None, ms, text)
-        self._record(o)
+        if not self.script_records_health:
+            self._record(o)
         return o
+
+    @staticmethod
+    def _attribution(text, model, account):
+        """(model, account) that served the call.
+
+        The skill's own report is authoritative; the pinned values are only a
+        fallback for skills that do not report (or that were asked to use a
+        model the skill then overrode).
+        """
+        m, a = parse_attribution(text)
+        return m or (model or ""), a or (account or "")
 
     def _record(self, o):
         """Feed the shared health store, if it is available.
+
+        Only for skills whose rotate script does NOT write the store itself
+        (see `script_records_health`). When the script does write, this method
+        is skipped on purpose: one real call recorded twice doubles the
+        uptime sample count and counts a single failure as two strikes.
 
         CRITICAL: `auth` parks a model PERMANENTLY. It must mean only one
         thing — this model's credential is broken. It must never be used for
@@ -106,8 +165,7 @@ class Adapter:
                 # The store ships as model-stats.py (hyphen), which a plain
                 # `import model_stats` cannot resolve. Load it by path so the
                 # adapter-side health recording actually runs instead of
-                # silently no-op'ing inside this try/except. No shell script
-                # writes the store today, so this is its only live writer.
+                # silently no-op'ing inside this try/except.
                 _spec = _ilu.spec_from_file_location(
                     "model_stats",
                     os.path.join(_shared, "model-stats.py"))

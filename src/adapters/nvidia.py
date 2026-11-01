@@ -15,6 +15,8 @@ from outcome import Outcome, FATAL, ROTATE_MODEL
 class NvidiaAdapter(Adapter):
     skill = "nvidia"
     script = ".agents/skills/nvidia/nvidia-rotate.sh"
+    # nvidia-rotate.sh records every call into the shared store.
+    script_records_health = True
     # This skill is a bare chat completion: `nvidia-rotate.sh` posts the
     # prompt to https://integrate.api.nvidia.com/v1/chat/completions and
     # prints the answer. There is no agent, no tool loop and no filesystem

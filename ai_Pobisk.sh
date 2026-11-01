@@ -36,6 +36,13 @@ REPO_ROOT="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 
 export AI_POBISK_ROOT="$REPO_ROOT"
 
+# Stream stdout/stderr unbuffered. When the run is redirected to a log
+# (./ai_Pobisk.sh ... > run.log 2>&1) Python otherwise block-buffers, so a
+# watcher doing `tail -f run.log` sees nothing until the process exits — the
+# run looks frozen for the whole duration. This makes the live log reflect
+# reality second-by-second.
+export PYTHONUNBUFFERED=1
+
 # Prefer the project's own interpreter: Playwright lives in .venv, and "the
 # dependency belongs to the project" only holds if the wrapper uses it.
 if [[ -z "${PYTHON:-}" && -x "$REPO_ROOT/.venv/bin/python" ]]; then

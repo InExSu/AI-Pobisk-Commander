@@ -215,7 +215,14 @@ class Supervisor:
         self._ctx_cache = {}     # task name -> context block ("" = none)
         self._no_evidence = False  # a file step reported ok but changed nothing
         self._status_last_activity = time.time()
-        self.status_dir = os.path.join(self.repo_root, ".ai_pobisk")
+        # The status file lives in the configured state dir, next to the
+        # journal. It used to be hardcoded to ".ai_pobisk", which meant a test
+        # run overwrote the live status.json an outside observer was reading
+        # — and a stale "model" from a fake adapter showed up as if it were
+        # the model serving the real task.
+        self.status_dir = os.path.join(
+            self.repo_root,
+            (cfg.get("state") or {}).get("dir") or ".ai_pobisk")
         self.status = _Status(self.status_dir)
         # Workers inherit this so they can write a liveness beacon the
         # supervisor — and a human — can read without process archaeology.

@@ -197,6 +197,27 @@ repo = ""
 # Cap on the prepended block, in characters.
 max_context_chars = 4000
 
+# ── Paths: platform-specific locations ─────────────────────────────────────────
+# All paths are resolved relative to repo root unless absolute.
+# On Windows, use backslashes or forward slashes — Python handles both.
+[paths]
+# Directory where task markdown files live (relative to repo root).
+tasks_dir = "configs/tasks"
+# Directory where completed/archived tasks are moved.
+tasks_disabled_dir = "configs/disabled"
+# State directory for journals, state, events (relative to repo root).
+state_dir = ".ai_pobisk"
+# Browser binaries directory (relative to repo root).
+browsers_dir = ".playwright"
+# Python venv directory (relative to repo root).
+venv_dir = ".venv"
+# Directory where cline/opencode/etc. accounts live (absolute or relative).
+accounts_dir = "~/.cline/accounts"
+# Directory where model health stats are stored (absolute or relative).
+model_stats_dir = "~/.ai-rotate"
+# Directory where secrets are stored (absolute or relative).
+secrets_dir = "~/.ai-rotate"
+
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 [tasks]
 dir = "configs/tasks"

@@ -62,10 +62,9 @@ def rotate_all(repo_root, cfg, extra_paths=()):
     jmax = int(lg.get("journal_max_bytes", 2_000_000))
 
     paths = list(extra_paths)
-    st = cfg.get("state") or {}
-    d = os.path.join(repo_root, st.get("dir", ".ai_pobisk"))
-    if st.get("journal"):
-        paths.append(os.path.join(d, st["journal"]))
+    d = os.path.join(repo_root, (cfg.get("paths") or {}).get("state_dir", ".ai_pobisk"))
+    if (cfg.get("state") or {}).get("journal"):
+        paths.append(os.path.join(d, (cfg.get("state") or {}).get("journal", "journal.md")))
 
     # Skill logs live outside the repo; rotate the ones we know about.
     home = os.path.expanduser("~")

@@ -59,6 +59,19 @@ DEFAULTS = {
             "filename",
         ],
     },
+    # ── Platform-specific paths ─────────────────────────────────────────────
+    # All paths are resolved relative to repo root unless absolute.
+    # On Windows, use backslashes or forward slashes — Python handles both.
+    "paths": {
+        "tasks_dir": "configs/tasks",
+        "tasks_disabled_dir": "configs/disabled",
+        "state_dir": ".ai_pobisk",
+        "browsers_dir": ".playwright",
+        "venv_dir": ".venv",
+        "accounts_dir": "~/.cline/accounts",
+        "model_stats_dir": "~/.ai-rotate",
+        "secrets_dir": "~/.ai-rotate",
+    },
     "questions": {
         "auto_answer_from": ["AGENTS.md", "README.md", "configs/", "docs/"],
         "ask_owner_when_confidence_below": 0.6,
@@ -199,6 +212,19 @@ DEFAULTS = {
             "file", "repo", "commit", "push", "branch", "folder", "directory",
             "filename",
         ],
+    },
+    # ── Platform-specific paths ─────────────────────────────────────────────
+    # All paths are resolved relative to repo root unless absolute.
+    # On Windows, use backslashes or forward slashes — Python handles both.
+    "paths": {
+        "tasks_dir": "configs/tasks",
+        "tasks_disabled_dir": "configs/disabled",
+        "state_dir": ".ai_pobisk",
+        "browsers_dir": ".playwright",
+        "venv_dir": ".venv",
+        "accounts_dir": "~/.cline/accounts",
+        "model_stats_dir": "~/.ai-rotate",
+        "secrets_dir": "~/.ai-rotate",
     },
     "questions": {
         "auto_answer_from": ["AGENTS.md", "README.md", "configs/", "docs/"],
@@ -348,9 +374,10 @@ def _parse_arena_models(data):
     return models
 
 
-def _load_cached_arena(repo_root):
+def _load_cached_arena(repo_root, cfg):
     """Return cached leaderboard dict if fresh enough, else None."""
-    cache_path = os.path.join(repo_root, ".ai_pobisk", "arena_leaderboard_cache.json")
+    state_dir = (cfg.get("paths") or {}).get("state_dir", ".ai_pobisk")
+    cache_path = os.path.join(repo_root, state_dir, "arena_leaderboard_cache.json")
     if not os.path.exists(cache_path):
         return None
     try:
@@ -367,9 +394,10 @@ def _load_cached_arena(repo_root):
     return None
 
 
-def _save_cached_arena(repo_root, models):
+def _save_cached_arena(repo_root, cfg, models):
     """Persist fetched leaderboard to cache."""
-    cache_path = os.path.join(repo_root, ".ai_pobisk", "arena_leaderboard_cache.json")
+    state_dir = (cfg.get("paths") or {}).get("state_dir", ".ai_pobisk")
+    cache_path = os.path.join(repo_root, state_dir, "arena_leaderboard_cache.json")
     try:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         with open(cache_path, "w") as f:
@@ -378,7 +406,7 @@ def _save_cached_arena(repo_root, models):
         pass
 
 
-def load_model_ranking(repo_root):
+def load_model_ranking(repo_root, cfg):
     """Return {model_id: score} for coding tasks.
 
     Priority:
@@ -389,7 +417,7 @@ def load_model_ranking(repo_root):
     Returns (models_dict, default_score).
     """
     # 1. Try live arena.ai leaderboard with cache
-    cached = _load_cached_arena(repo_root)
+    cached = _load_cached_arena(repo_root, cfg)
     if cached is not None:
         return cached, 50
 
@@ -397,7 +425,7 @@ def load_model_ranking(repo_root):
     if live:
         models = _parse_arena_models(live)
         if models:
-            _save_cached_arena(repo_root, models)
+            _save_cached_arena(repo_root, cfg, models)
             return models, 50
 
     # 2. Fall back to static TOML file

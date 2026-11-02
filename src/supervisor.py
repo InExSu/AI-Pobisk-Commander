@@ -66,14 +66,23 @@ def _nudge_prompt(step):
     return "%s\n\n---\n%s" % (step, NUDGE)
 
 
-def _target_dir_from_task(task):
+def _target_dir_from_task(task, cfg=None):
     """Absolute directory mentioned in a task body, or None.
 
     Tasks are written as "Прочитать /abs/path/AGENTS.md …" — the first absolute
     path usually names the repo the work belongs to.
+
+    Platform-aware: on Unix matches /abs/path, on Windows matches X:\\abs\\path.
+    The regex can be overridden via cfg["paths"]["task_path_regex"].
     """
     import re
-    m = re.search(r"(/Users/[^\s\"'`,)]+|/[a-z][^\s\"'`,)]*/)", task.body or "")
+    pattern = None
+    if cfg:
+        pattern = (cfg.get("paths") or {}).get("task_path_regex")
+    if not pattern:
+        # Default: Unix absolute path OR Windows drive letter path
+        pattern = r"(/[^\s\"'`,)]+|[a-zA-Z]:[\\/][^\\s\"'`,]*)"
+    m = re.search(pattern, task.body or "")
     if not m:
         return None
     p = m.group(1)
@@ -119,7 +128,7 @@ def _target_repo_dir(task, cfg):
     g = (cfg.get("graft") or {}) if cfg else {}
     if g.get("repo"):
         return g["repo"]
-    return _target_dir_from_task(task) or None
+    return _target_dir_from_task(task, cfg) or None
 
 
 def _repo_snapshot(repo_dir):
@@ -239,7 +248,7 @@ class Supervisor:
         # the model serving the real task.
         self.status_dir = os.path.join(
             self.repo_root,
-            (cfg.get("state") or {}).get("dir") or ".ai_pobisk")
+            (cfg.get("paths") or {}).get("state_dir", ".ai_pobisk"))
         self.status = _Status(self.status_dir)
         # Workers inherit this so they can write a liveness beacon the
         # supervisor — and a human — can read without process archaeology.
@@ -249,7 +258,7 @@ class Supervisor:
         # models_for_coding.toml maps model_id -> score. Higher = better.
         # Unknown models fall back to default_score. Used by
         # _ranked_models() to try better models first on every step.
-        self._model_ranking, self._model_default_score = load_model_ranking(repo_root)
+        self._model_ranking, self._model_default_score = load_model_ranking(repo_root, cfg)
         if self._model_ranking:
             source = "arena.ai leaderboard" if self._model_ranking else "static TOML"
             self._say("  model rating: %d models loaded (%s)" % (len(self._model_ranking), source))
@@ -487,7 +496,7 @@ class Supervisor:
             # different targets, and a shared os.environ export let task A's
             # export point task B's worker at A's repository.
             target = (self.cfg.get("graft") or {}).get("repo") \
-                or _target_dir_from_task(task)
+                or _target_dir_from_task(task, self.cfg)
             import base as _adapter_base
             _adapter_base.set_target_dir(target or None)
             # Count the attempt before it starts: if the worker dies mid-call
@@ -688,7 +697,7 @@ class Supervisor:
         if "requires: text" in low or "requires: no-filesystem" in low:
             return False
 
-        if task is not None and _target_dir_from_task(task):
+        if task is not None and _target_dir_from_task(task, self.cfg):
             return True
 
         keywords = self.cfg.get("capabilities", {}).get("file_task_keywords")
@@ -775,7 +784,7 @@ class Supervisor:
         if self.cfg.get("graft", {}).get("repo"):
             target = self.cfg["graft"]["repo"]
         else:
-            target = _target_dir_from_task(task) or self.repo_root
+            target = _target_dir_from_task(task, self.cfg) or self.repo_root
         return ("Work in this directory: %s\n\n%s" % (target, prompt))
 
     def _with_context(self, task, step):
@@ -801,7 +810,7 @@ class Supervisor:
             # being asked to add games to igrasu.ru — context that actively
             # misleads. Resolved per task, not once per run.
             explicit = (g.get("repo") or "").strip()
-            root = explicit or _target_dir_from_task(task) or self.repo_root
+            root = explicit or _target_dir_from_task(task, self.cfg) or self.repo_root
             if self._graft_ctx is None:
                 try:
                     import graftctx

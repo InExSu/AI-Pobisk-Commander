@@ -430,7 +430,16 @@ AI-Pobisk-Commander/
 │   ├── mailbox.py            # IMAP mailbox
 │   ├── signup.py             # registration form filler
 │   ├── browser.py            # Playwright driver
-│   └── pageview.py           # HTML → controls
+│   ├── pageview.py           # HTML → controls
+│   ├── competence.py         # capability gating (filesystem/text)
+│   └── adapters/             # skill adapters (cline, opencode, nvidia, tokenharbor, freebuff, kilo)
+│       ├── base.py           # shared plumbing, _kill_tree, _is_credential_failure
+│       ├── cline.py
+│       ├── freebuff.py
+│       ├── kilo.py
+│       ├── nvidia.py
+│       ├── opencode.py
+│       └── tokenharbor.py
 ├── .agents/skills/           # agent skills (cline, opencode, nvidia, tokenharbor, freebuff)
 ├── .agents/skills/_shared/   # shared: model-stats, secrets, outcome
 ├── scripts/                  # auxiliary scripts

@@ -1,0 +1,101 @@
+# models_for_coding.toml — рейтинг моделей для целей программирования.
+#
+# Чем выше число, тем лучше модель подходит для кодинга (по мнению владельца).
+# Используется супервайзером ai_Pobisk при выборе модели для шага:
+#   * первый вызов модели берёт модель с наивысшим рейтингом;
+#   * при rotate_model берётся следующая по убыванию рейтинга.
+#
+# Имена моделей пишутся так, как они передаются в -m (с префиксом скилла:
+# "nvidia/nemotron-3-super-120b-a12b", "kilo/nvidia/nemotron-3.5-super-vl:free",
+# "cline-free/deepseek-v4.1-flash" и т.д.). Неизвестная модель получает
+# default.score (см. секцию [default]).
+
+[default]
+score = 50
+
+[models]
+# ── Лучшие для программирования (топ-класс) ─────────────────────────────────
+"nvidia/nemotron-3-super-120b-a12b" = 100
+"nvidia/nemotron-3-super-120b-a12b:free" = 100
+"claude-opus-4.5" = 98
+"claude-opus-4.1" = 96
+"claude-sonnet-4.5" = 94
+"claude-sonnet-4" = 92
+"claude-haiku-4.5" = 88
+
+# ── Nemotron / NVIDIA ──────────────────────────────────────────────────────
+"nvidia/nemotron-3-ultra-550b-a55b" = 92
+"nvidia/nemotron-3-ultra-550b-a55b:free" = 92
+"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" = 88
+"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" = 88
+"nvidia/nemotron-3.5-lightning" = 85
+"nvidia/nemotron-3.5-lightning:free" = 85
+
+# ── Google / GLM ───────────────────────────────────────────────────────────
+"z-ai/glm-5.3-flash" = 82
+"z-ai/glm-flash-latest" = 80
+"z-ai/glm-latest" = 76
+"google/gemini-flash-latest" = 78
+"google/gemini-pro-latest" = 74
+
+# ── OpenAI ─────────────────────────────────────────────────────────────────
+"openai/gpt-astra-latest" = 86
+"openai/gpt-luna-latest" = 84
+"openai/gpt-sol-latest" = 82
+"openai/gpt-terra-latest" = 80
+"openai/gpt-mini-latest" = 76
+
+# ── DeepSeek ───────────────────────────────────────────────────────────────
+"deepseek/deepseek-v4-flash-latest" = 80
+"deepseek/deepseek-pro-latest" = 78
+"deepseek/deepseek-flash-latest" = 74
+
+# ── OpenRouter (через kilo / cline) ────────────────────────────────────────
+"openrouter/nvidia/nemotron-3.5-super-vl:free" = 90
+"openrouter/nvidia/nemotron-3.5-lightning:free" = 86
+"openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" = 84
+"openrouter/nvidia/nemotron-3-ultra-550b-a55b:free" = 82
+"openrouter/google/gemma-4-26b-a4b-it:free" = 70
+"openrouter/google/gemma-4-31b-it:free" = 68
+"openrouter/cohere/north-mini-code:free" = 66
+"openrouter/recursive/flint-v1.0:free" = 64
+"openrouter/liquid/lfm-2.5-2.6b:free" = 62
+"openrouter/xingchen-agi/xing4.0-29b-a4b:free" = 60
+"openrouter/thinkingmachines/inkling-small:free" = 58
+"openrouter/thinkingmachines/inkling:free" = 56
+"openrouter/openrouter/free" = 50
+
+# ── Moonshot / xAI / Unbiased ──────────────────────────────────────────────
+"moonshotai/kimi-latest" = 72
+"x-ai/grok-latest" = 68
+"unbiased/pareto-latest" = 65
+
+# ── Aion labs ──────────────────────────────────────────────────────────────
+"aion-labs/aion-3.5" = 62
+"aion-labs/aion-3.5-mini" = 58
+"aion-labs/aion-3.0" = 54
+"aion-labs/aion-2.0" = 50
+
+# ── Amazon Nova ────────────────────────────────────────────────────────────
+"amazon/nova-pro-v1" = 62
+"amazon/nova-lite-v1" = 58
+"amazon/nova-micro-v1" = 54
+"amazon/nova-2-lite-v1" = 50
+
+# ── Прочие (медиум/слабые) ─────────────────────────────────────────────────
+"stepfun/step-3.7-flash" = 66
+"thinkingmachines/inkling-small" = 60
+"thinkingmachines/inkling" = 56
+"inclusionai/ling-3.0-flash-vl" = 60
+"inclusionai/ling-3.0-flash-sante" = 56
+"inclusionai/ling-3.0-flash-fin" = 56
+"dots-studio/dots-3-note-preview" = 52
+"liquid/lfm-2.5-2.6b" = 58
+"liquid/lfm-2.5-2.6b:free" = 58
+"poolside/laguna-s-2.1" = 64
+"poolside/laguna-s-2.1:free" = 64
+"poolside/laguna-xs-2.1:free" = 58
+"recursive/flint-v1.0" = 50
+"cline-free/deepseek-v4.1-flash" = 84
+"cline-free/muse-spark-1.3-contributor" = 78
+"cline-free/solar-pro4" = 72

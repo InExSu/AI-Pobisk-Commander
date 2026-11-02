@@ -135,5 +135,26 @@ def load(repo_root):
     return _merge(DEFAULTS, data), path
 
 
+def load_model_ranking(repo_root):
+    """Read configs/models_for_coding.toml — per-model quality rating for
+    coding tasks. Used by the supervisor to try better models first.
+
+    Returns {models: {model_id: score}, default: {score: N}} or an empty
+    dict when the file is absent — then the supervisor falls back to the
+    catalogue order from each adapter.
+    """
+    path = os.path.join(repo_root, "configs", "models_for_coding.toml")
+    if not os.path.exists(path) or tomllib is None:
+        return {}
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except Exception as e:
+        print("config: cannot parse %s (%s), ignoring model ranking"
+              % (path, e), file=sys.stderr)
+        return {}
+    return data.get("models", {}), data.get("default", {"score": 50})
+
+
 def budget(cfg, key, default=0):
     return int(cfg.get("budget", {}).get(key, default))

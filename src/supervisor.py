@@ -35,6 +35,7 @@ for p in (_HERE, os.path.join(_HERE, "adapters"),
         sys.path.insert(0, p)
 
 import statemachine as sm       # noqa: E402
+from config import load_model_ranking  # noqa: E402
 
 # Answer a confirmation prompt on the user's behalf. Phrased to cover the
 # shapes agents actually emit (y/N, Enter, "any key") without being so
@@ -244,6 +245,13 @@ class Supervisor:
         # supervisor — and a human — can read without process archaeology.
         os.environ["PB_STATUS_DIR"] = self.status_dir
         self._sync_no_filesystem()
+        # ── Model quality rating for coding ──────────────────────────────
+        # models_for_coding.toml maps model_id -> score. Higher = better.
+        # Unknown models fall back to default.score (50). Used by
+        # _ranked_models() to try better models first on every step.
+        self._model_ranking, self._model_default = load_model_ranking(repo_root)
+        if self._model_ranking:
+            self._say("  model rating: %d models loaded" % len(self._model_ranking))
 
     def _sync_no_filesystem(self):
         """Hand the configured no-filesystem list to classify.
@@ -461,6 +469,12 @@ class Supervisor:
             # Publish which worker owns this attempt so an outside observer
             # reading status.json sees the active hand, not just "running".
             self.status.write(self._status_last_activity, worker=skill)
+
+            # Pick the best model by coding rating for the first attempt on
+            # this worker; later rotations walk the same sorted list.
+            if model is None:
+                ranked = self._ranked_models(skill, a.models() if hasattr(a, "models") else [])
+                model = ranked[0] if ranked else None
 
             self._say("  step %d: %s%s" % (idx, skill,
                                            " (%s)" % model if model else ""))
@@ -805,12 +819,33 @@ class Supervisor:
             return step
         return "%s\n\n---\n%s" % (block, step)
 
+    def _ranked_models(self, skill, models):
+        """Return `models` sorted by coding rating (highest first).
+
+        Unknown models fall back to default.score. Models already tried on
+        this step are kept but pushed to the end — the supervisor has already
+        rejected them once, so they are a last resort.
+        """
+        if not models:
+            return []
+        ranking = self._model_ranking
+        default_score = self._model_default.get("score", 50)
+        tried = self._tried.get(skill, set())
+
+        def sort_key(m):
+            score = ranking.get(m, default_score)
+            # Tried models are deprioritised: they already failed this step.
+            penalty = 1000 if m in tried else 0
+            return (-score, penalty)
+
+        return sorted(models, key=sort_key)
+
     def _next_model(self, skill, current):
         """Another model on the same skill, or None to let the skill choose.
 
         `current` may be None when the skill picked internally and did not say
-        which model it used. Falling back to models[0] would re-run the very
-        model that just failed, so track the tried ones and advance past them.
+        which model it used. Models are returned in coding-rating order
+        (highest first), so the best available model is tried next.
         """
         a = self.adapters.get(skill)
         if not a or not hasattr(a, "models"):
@@ -818,21 +853,22 @@ class Supervisor:
         models = a.models()
         if not models:
             return None
-        if current and current in models:
-            i = models.index(current)
-            nxt = models[(i + 1) % len(models)]
+        ranked = self._ranked_models(skill, models)
+        if current and current in ranked:
+            i = ranked.index(current)
+            nxt = ranked[(i + 1) % len(ranked)]
         else:
             tried = self._tried.setdefault(skill, set())
             if current:
                 tried.add(current)
             nxt = None
-            for m in models:
+            for m in ranked:
                 if m not in tried:
                     nxt = m
                     break
             if nxt is None:
                 tried.clear()          # every model tried: start over once
-                nxt = models[0]
+                nxt = ranked[0]
         if nxt:
             self._tried.setdefault(skill, set()).add(nxt)
         return nxt

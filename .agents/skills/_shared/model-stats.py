@@ -271,7 +271,7 @@ def cmd_record(argv):
 def cmd_order(argv):
     """Best-first ordering of the candidate models for one rotation pass."""
     skill = None
-    models = []
+    models_input = []
     cooldown = COOLDOWN_SEC
     family_of = None
     i = 0
@@ -280,7 +280,7 @@ def cmd_order(argv):
         if a == "--models":
             i += 1
             while i < len(argv) and not argv[i].startswith("--"):
-                models.append(argv[i])
+                models_input.append(argv[i])
                 i += 1
             continue
         if a == "--cooldown":
@@ -303,54 +303,78 @@ def cmd_order(argv):
         print("usage: model-stats.py order <skill> --models m1 m2 ... "
               "[--cooldown N]", file=sys.stderr)
         return 2
-    if not models:
+    if not models_input:
         return 0
 
+    # If --models not given, read from store or use defaults
     d = load().get(skill, {})
     now = time.time()
+
+    # Build the model list: use --models if given, otherwise derive from store
+    # or default models. Models not in the store are treated as unknown.
+    if models_input:
+        models = models_input
+    else:
+        # Use default models from the skill's perspective, or those in the store
+        models = [m for m in d.keys()] if d else []
+        if not models:
+            print("no models found in store for skill %s" % skill, file=sys.stderr)
+            return 0
+
     healthy, cooling, unknown = [], [], []
 
     for rank, m in enumerate(models):
         e = d.get(m)
         if e is None:
+            # Model never probed: give it a chance at the end
             unknown.append((rank, 0.0, m))
             continue
         cd = float(e.get("cooldown_until") or 0)
-        if e.get("state") == "auth_error":
-            # Parked. Still parked -> skip. Park expired -> give it one more
-            # chance, unless it has already been parked the max number of
-            # times (then it is genuinely broken and we stop asking).
+        state = e.get("state")
+
+        # 1. Auth-parked models: skip while parked, give one chance after
+        #    expiry, unless maxed out parks (then genuinely broken -> the
+        #    credential can no longer be fixed by waiting, so stop asking).
+        if state == "auth_error":
             if cd > now:
+                # Still parked -> excluded from THIS pass entirely. Rotation
+                # picks it up only when the park expires, never as a tail
+                # entry: a parked model returned last is still returned.
                 continue
             if (e.get("parks") or 0) >= AUTH_MAX_PARKS:
+                print("  stats  %s/%s skipped: %d parks reached, "
+                      "likely broken credential" % (skill, m, e.get("parks", 0)),
+                      file=sys.stderr)
                 continue
+            # Park expired, promote to recovering for one more chance
             e["state"] = "recovering"
-        if e.get("state") in ("down", "ratelimit") and cd > now:
-            cooling.append((cd, rank, m))  # retried only after cooldown
+
+        # 2. Transient states (down, ratelimit) still cooling -> defer
+        if state in ("down", "ratelimit") and cd > now:
+            cooling.append((cd, rank, m))
             continue
-        if e.get("state") in ("down", "ratelimit") and cd <= now:
-            e["state"] = "recovering"     # prober: one cheap retry allowed
-        # Only a model that has actually answered belongs in the ranked bucket.
-        # A model with zero successes (e.g. 0/3 probes, or one still recovering)
-        # would otherwise be scored 60/100 on empty latency stats and would jump
-        # ahead of models that were never tried at all.
+
+        # 3. Transient states that have cooled -> recovery phase (one retry)
+        if state in ("down", "ratelimit") and cd <= now:
+            e["state"] = "recovering"
+
+        # 4. Models with recorded successes -> rank by stability
         if (e.get("uptime") or [0, 0])[0] > 0:
             healthy.append((-(e.get("stability") or 0), rank, m))
         else:
+            # Proven never succeeded (0/0 or 0/N): give a chance, but last
             unknown.append((rank, 0.0, m))
 
-    healthy.sort()
-    cooling.sort()
-    unknown.sort()
+    # healthy (best stability first) → unknown (never tried) → cooling last
+    healthy.sort(key=lambda x: x[0])
+    cooling.sort(key=lambda x: x[0])
+    unknown.sort(key=lambda x: x[0])
 
-    # healthy (proven, by stability) → unknown (never tried, give it a chance)
-    # → cooling (proven broken, only as a last resort when nothing else is left)
-    ordered = [m for _, _, m in healthy] + [m for _, _, m in unknown] + \
+    ordered = [m for _, _, m in healthy] + \
+              [m for _, _, m in unknown] + \
               [m for _, _, m in cooling]
 
     # Family-preserving failover: after `family_of` died, prefer its siblings.
-    # Only lifts within the already-eligible list — never revives a model the
-    # breaker dropped (auth_error) or one still cooling down.
     if family_of:
         fam = family(family_of)
         if fam:

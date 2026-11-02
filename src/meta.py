@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -63,6 +64,27 @@ class Meta:
     # ── selection ─────────────────────────────────────────────────────────────
     def select(self, verbose=False):
         """Find the first candidate that answers. Returns True if one did."""
+        # Check cache first
+        cache_path = os.path.join(self.repo_root, ".ai_pobisk", "meta_cache.json")
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path) as f:
+                    cache = json.load(f)
+                skill, model = cache.get("skill", ""), cache.get("model", "")
+                if skill and model:
+                    a = self.adapters.get(skill)
+                    if a and a.available():
+                        # Quick health check
+                        o = a.run("Reply with exactly: ok", model=model,
+                                  timeout=min(10, self.cfg["meta"]["timeout_sec"]))
+                        if o.outcome == OK or (o.raw or "").strip():
+                            self.model = (skill, model)
+                            if verbose:
+                                print("  meta model (cached): %s / %s" % (skill, model))
+                            return True
+            except Exception:
+                pass  # fall through to fresh selection
+
         for cand in self.cfg["meta"]["candidates"]:
             skill, model = cand.get("skill", ""), cand.get("model", "")
             a = self.adapters.get(skill)
@@ -75,6 +97,13 @@ class Meta:
                 if verbose:
                     print("  meta model: %s / %s (%sms)"
                           % (skill, model, o.elapsed_ms))
+                # Save to cache
+                try:
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    with open(cache_path, "w") as f:
+                        json.dump({"skill": skill, "model": model, "ts": time.time()}, f)
+                except Exception:
+                    pass
                 return True
             if verbose:
                 print("  meta candidate %s/%s -> %s" % (skill, model, o.outcome))

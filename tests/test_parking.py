@@ -71,7 +71,13 @@ class TestCredentialVsAccount(unittest.TestCase):
     """`auth` may mean ONLY 'this credential is broken'."""
 
     def setUp(self):
-        sys.path.insert(0, os.path.join(ROOT, "src"))
+        # base.py and its adapters import `outcome` as a plain module from
+        # .agents/skills/_shared — production adds that dir to sys.path in
+        # main.py and classify.py; the test repeats the same paths.
+        for p in (os.path.join(ROOT, "src"),
+                  os.path.join(ROOT, ".agents", "skills", "_shared")):
+            if p not in sys.path:
+                sys.path.insert(0, p)
         from adapters import base
         self.base = base
 

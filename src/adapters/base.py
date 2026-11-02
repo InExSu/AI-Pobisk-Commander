@@ -212,15 +212,26 @@ class Adapter:
 
     @staticmethod
     def _is_credential_failure(o):
-        """True only when the CREDENTIAL is bad, not the account's balance."""
+        """True only when the CREDENTIAL is bad, not the account's balance.
+
+        Important: only mark as credential failure when the error is specifically
+        about authentication credentials. Transient errors like rate limits, timeouts,
+        or model unavailability must NOT be marked as auth errors, otherwise the
+        fleet collapses and rotation stops working.
+        """
         d = (o.detail or "").lower()
+        # HTTP 401/403 are unambiguous: bad credential
         if o.http in (401, 403):
             return True
+        # Explicit credential rejection patterns
         for s in ("credential rejected", "auth error", "invalid api key",
                   "unauthorized", "unauthenticated", "no authtoken",
-                  "no api key", "missing api key", "not authenticated"):
+                  "no api key", "missing api key", "not authenticated",
+                  "bad credential", "credential brain Failed"):
             if s in d:
                 return True
+        # 402 payment/status quo errors are NOT credential failures
+        # 404 model-not-found is NOT a credential failure
         return False
 
     @staticmethod

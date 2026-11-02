@@ -131,6 +131,16 @@ WAITING_PATTERNS = re.compile(
     r"|waiting for (?:your )?(?:input|confirmation|approval|response)",
     re.I)
 
+# Cline device-flow / browser auth — treat as rotate_account (credential expired)
+CLINE_AUTH_PATTERNS = re.compile(
+    r"https?://authkit\.cline\.bot/"
+    r"|device flow"
+    r"|user_code"
+    r"|authorization_session"
+    r"|please.*authorize.*browser"
+    r"|open.*browser.*authenticate",
+    re.I)
+
 # Signals that the model stopped to ask something rather than to fail.
 # Russian is a first-class citizen here: workers answer in the project's
 # language, and a question in Russian that scored `ok` once stalled a task
@@ -211,6 +221,12 @@ def classify(text, http=None, skill="", model="", account="", elapsed_ms=0,
                        "blocked on a confirmation prompt",
                        http, elapsed_ms, text)
 
+    # Cline device-flow auth — credential expired, rotate account
+    if CLINE_AUTH_PATTERNS.search(text):
+        return Outcome(ROTATE_ACCOUNT, skill, model, account,
+                       "cline device-flow auth required (token expired)",
+                       http, elapsed_ms, text)
+
     # A worker that had to be KILLED is a model fault, not bad luck. rc < 0
     # means a signal (stall guard / watchdog terminated a silent worker);
     # 124 is run_cmd's own timeout killer. The prose below ("timed out …")
@@ -247,9 +263,16 @@ def classify(text, http=None, skill="", model="", account="", elapsed_ms=0,
         if code == 404:
             return Outcome(ROTATE_MODEL, skill, model, account,
                            "model not found", code, elapsed_ms, text)
-        if code == 429 or code == 529 or code >= 500:
+        if code in (429, 529):
             return Outcome(RETRY, skill, model, account,
-                           "transient HTTP %d" % code, code, elapsed_ms, text)
+                           "transient HTTP %d (rate limit)" % code, code,
+                           elapsed_ms, text)
+        if code >= 500:
+            # 5xx can be either transient or permanent depending on the cause.
+            # Classify as retry first; the rule table below will re-check prose.
+            return Outcome(RETRY, skill, model, account,
+                           "transient HTTP %d (server error)" % code, code,
+                           elapsed_ms, text)
 
     for rx, outcome, why in COMPILED:
         if rx.search(text):

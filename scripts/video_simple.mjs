@@ -31,18 +31,8 @@ if (!fs.existsSync(outputDir)) {
     browser = await chromium.launch({ headless: true });
 
     // Create context WITHOUT recordVideo option (simpler)
-    context = await browser.newContext({ 
-      viewport: { width: 1280, height: 720 },
-      deviceScaleFactor: 1
-    });
 
-    page = await context.newPage();
-
-    // Navigate to the game
-    console.log('Navigating to game...');
-    await page.goto(url, { waitUntil: 'networkidle' });
-    await page.waitForTimeout(3000);
-
+     // Create context with recordVideo enabled 
     // Get the video object - this may return null without recordVideo context option
     const video = page.video();
     console.log('Video object:', video);

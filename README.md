@@ -392,10 +392,12 @@ Details and pitfalls — in `SKILL.md` of each agent.
    $env:PLAYWRIGHT_BROWSERS_PATH="$PWD\.playwright"
    .venv\Scripts\python.exe -m playwright install chromium
    ```
-2. Run via `python src/main.py` or `bash ai_Pobisk.sh` (Git Bash / WSL).
+2. Run via `python src\main.py` or `bash ai_Pobisk.sh` (Git Bash / WSL).
 3. Edit `configs/ai_pobisk.toml` for paths, timeouts, and parallelism instead of editing source code.
 
-Platform-specific knobs live in `[paths]`, `[runtime]`, and `[browser]` sections of `configs/ai_pobisk.toml`.
+Platform-specific locations live in the `[paths]` section of `configs/ai_pobisk.toml` — `state_dir`, `browsers_dir`, `venv_dir`, `accounts_dir`, `model_stats_dir`, `secrets_dir`, plus `[tasks].dir` / `[tasks].disabled` and `[browser].screens_dir`. All accept forward or backslashes and are resolved against the repo root (`~` expands). `[paths].state_dir` is the Windows-friendly spelling of the older `[state].dir` — set either, `_apply_paths` in `src/config.py` projects one onto the other, so a single setting works everywhere.
+
+What the Python code already handles: no POSIX-only syscalls (`killpg` has a Windows fallback in `src/adapters/base.py::_kill_tree`), `cls`/`clear` selected by `os.name`, and paths built only with `os.path.join` / `expanduser`. What it does **not** handle: `ai_Pobisk.sh` and the skill supervisors in `.agents/skills/*/` are bash scripts — run them under Git Bash or WSL, or call `python src/main.py` directly.
 
 ---
 

@@ -246,7 +246,9 @@ def cmd_watch(repo_root, args):
                 print(json.dumps(summ, ensure_ascii=False))
                 sys.stdout.flush()
             else:
-                os.system("clear")
+                # POSIX `clear`, Windows `cls` — `watch` is a live console
+                # view, so it must erase, not scroll.
+                os.system("cls" if os.name == "nt" else "clear")
                 print("ai_Pobisk — run %s   (ctrl-c to stop watching)" % m.run)
                 print()
                 print("%-26s %-12s %-22s %-10s %s"

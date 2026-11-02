@@ -15,6 +15,27 @@ import subprocess
 import threading
 import time
 
+def _kill_tree(p):
+    """Kill everything behind a worker call, on any platform.
+
+    POSIX: the worker is started with start_new_session=True, so it leads its
+    own process group — killpg then takes the skill wrapper, the agent and
+    its children together. Windows has no process groups; Popen.kill() ends
+    the main process and the OS reaps orphans. Must never raise: an
+    exception here would turn a timeout into an unhandled crash.
+    """
+    if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            return
+        except Exception:
+            pass
+    try:
+        p.kill()
+    except Exception:
+        pass
+
+
 HEALTH_STORE = os.path.join(
     os.environ.get("AI_ROTATE_DIR") or os.path.expanduser("~/.ai-rotate"),
     "model-stats.json")
@@ -299,10 +320,7 @@ def run_cmd(argv, timeout=None, env=None, cwd=None):
         return p.returncode, out or "", err or ""
     except subprocess.TimeoutExpired:
         # Take the whole tree down: the wrapper, the agent, its children.
-        try:
-            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-        except Exception:
-            p.kill()
+        _kill_tree(p)
         try:
             out, err = p.communicate(timeout=10)
         except Exception:

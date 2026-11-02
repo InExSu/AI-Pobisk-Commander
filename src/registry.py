@@ -18,6 +18,7 @@ for p in (_HERE, _SHARED, os.path.join(_HERE, "adapters")):
 from adapters.base import Adapter           # noqa: E402
 from adapters.cline import ClineAdapter     # noqa: E402
 from adapters.freebuff import FreeBuffAdapter   # noqa: E402
+from adapters.kilo import KiloAdapter       # noqa: E402
 from adapters.nvidia import NvidiaAdapter   # noqa: E402
 from adapters.opencode import OpenCodeAdapter   # noqa: E402
 from adapters.tokenharbor import TokenHarborAdapter  # noqa: E402
@@ -26,13 +27,14 @@ from adapters.tokenharbor import TokenHarborAdapter  # noqa: E402
 CLASSES = [
     NvidiaAdapter,        # pure HTTP, no accounts, most reliable
     TokenHarborAdapter,   # pure HTTP, 4 models
+    KiloAdapter,          # pure HTTP via Kilo CLI, free models with :free suffix
     OpenCodeAdapter,      # account+model rotation, needs isolated accounts
     ClineAdapter,         # account+model rotation, sweeps internally
     FreeBuffAdapter,      # TUI only: capacity probe
 ]
 
 # Skills that can actually execute a prompt.
-WORKERS = {"nvidia", "tokenharbor", "opencode", "cline"}
+WORKERS = {"nvidia", "tokenharbor", "kilo", "opencode", "cline"}
 
 
 def build(repo_root):

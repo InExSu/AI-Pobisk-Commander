@@ -110,9 +110,11 @@ same_repo_guard = true
 # workers.no_filesystem below). Text steps still use them — that is the one
 # thing they are good at.
 [workers]
-order = ["cline", "opencode", "nvidia", "tokenharbor"]
-# freebuff is a TUI with no prompt mode: capacity probe only, never a worker.
-non_workers = ["freebuff"]
+# Только скиллы с файловой системой (могут читать/писать/запускать код).
+# nvidia/tokenharbor — bare chat-completion API, без инструментов.
+order = ["cline", "opencode", "kilo"]
+# freebuff — TUI без prompt mode; nvidia/tokenharbor/kilo — только текст, без ФС.
+non_workers = ["freebuff", "nvidia", "tokenharbor", "kilo"]
 
 # A bare API call cannot use tools. When the reply says so, treat it as
 # "this worker cannot do it" and move on rather than recording success.
@@ -134,7 +136,7 @@ patterns = [
 # These are dropped from the worker list of any step that edits files.
 # The adapters also declare `has_filesystem = False`; the two are unioned, so
 # this list can only ever exclude a worker, never mis-route file work.
-skills = ["nvidia", "tokenharbor"]
+skills = ["nvidia", "tokenharbor", "kilo"]
 
 # ── Capability routing ────────────────────────────────────────────────────────
 # How the supervisor decides that a step needs to change files on disk.

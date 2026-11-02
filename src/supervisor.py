@@ -248,7 +248,7 @@ class Supervisor:
         # the model serving the real task.
         self.status_dir = os.path.join(
             self.repo_root,
-            (cfg.get("paths") or {}).get("state_dir", ".ai_pobisk"))
+            (cfg.get("state") or {}).get("dir") or ".ai_pobisk")
         self.status = _Status(self.status_dir)
         # Workers inherit this so they can write a liveness beacon the
         # supervisor — and a human — can read without process archaeology.

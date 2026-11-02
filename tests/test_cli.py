@@ -29,7 +29,13 @@ class TestReadOnlyCommands(unittest.TestCase):
     def test_list(self):
         rc, out, _ = run("list")
         self.assertEqual(rc, 0)
-        self.assertIn("tasks:", out)
+        # The repo's configs/tasks can legitimately be empty: done tasks are
+        # archived into configs/disabled. An honest listing ("tasks:") and an
+        # honest note why there is nothing ("skipped: no task dir") both
+        # satisfy the contract; empty output does not.
+        self.assertTrue(
+            ("tasks:" in out) or ("skipped:" in out),
+            "list printed nothing meaningful:\n%s" % out)
 
     def test_list_alias_from_plan(self):
         # План.md spells it --list; both spellings must work.

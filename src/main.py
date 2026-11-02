@@ -892,7 +892,9 @@ def _run_tasks(repo_root, cfg, tasks, sv, args):
     def _move_completed(task_name):
         """Move completed task file to configs/disabled/ atomically."""
         tasks_dir = os.path.join(repo_root, cfg["tasks"]["dir"])
-        disabled_dir = os.path.join(repo_root, "configs", "disabled")
+        disabled_dir = os.path.join(
+            repo_root,
+            (cfg.get("tasks") or {}).get("disabled", "configs/disabled"))
         os.makedirs(disabled_dir, exist_ok=True)
         src = os.path.join(tasks_dir, task_name)
         dst = os.path.join(disabled_dir, task_name)
@@ -983,6 +985,7 @@ def cmd_models(repo_root, args):
                         _load_cached_arena, load_model_ranking,
                         ARENA_LEADERBOARD_URL)
     sub = getattr(args, "sub", "show") or "show"
+    cfg, _ = config.load(repo_root)
 
     if sub == "refresh":
         live = _fetch_json(ARENA_LEADERBOARD_URL)
@@ -994,7 +997,7 @@ def cmd_models(repo_root, args):
         if not models:
             print("models: arena.ai returned no parseable models")
             return 1
-        _save_cached_arena(repo_root, models)
+        _save_cached_arena(repo_root, cfg, models)
         print("models: refreshed %d models from arena.ai leaderboard (%s)"
               % (len(models), ARENA_LEADERBOARD_URL))
         for mid, score in sorted(models.items(), key=lambda kv: -kv[1])[:10]:
@@ -1002,7 +1005,7 @@ def cmd_models(repo_root, args):
         return 0
 
     # show (default)
-    models, default_score = load_model_ranking(repo_root)
+    models, default_score = load_model_ranking(repo_root, cfg)
     if not models:
         print("models: no rating data available")
         return 1

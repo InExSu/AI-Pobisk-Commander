@@ -27,7 +27,7 @@ class Metrics:
 
     def __init__(self, repo_root, cfg):
         self.cfg = cfg
-        d = os.path.join(repo_root, (cfg.get("paths") or {}).get("state_dir", ".ai_pobisk"))
+        d = os.path.join(repo_root, (cfg.get("state") or {}).get("dir", ".ai_pobisk"))
         # Never raise: monitoring is best-effort. A repo root that cannot be
         # created (bad permissions, embedded NUL, ...) must not take the run
         # down with it — emit() will simply no-op.

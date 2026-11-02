@@ -70,8 +70,12 @@ def load_tasks(repo_root, cfg):
     """Read every .md in configs/tasks/, ordered by filename."""
     d = os.path.join(repo_root, cfg["tasks"]["dir"])
     tasks = []
+    # skipped is ALWAYS a list of strings: a missing dir is one note in that
+    # list, not a bare string. Every caller does len(skipped) or iterates it;
+    # a string there counted its own characters ("97 skipped") and printed
+    # the path one character per line.
     if not os.path.isdir(d):
-        return tasks, "no task dir: %s" % d
+        return tasks, ["no task dir: %s" % d]
 
     names = sorted(
         (n for n in os.listdir(d) if n.lower().endswith(".md")),

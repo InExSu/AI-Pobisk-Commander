@@ -974,8 +974,8 @@ def cmd_issues(repo_root, args):
 def cmd_models(repo_root, args):
     """Model rating for coding tasks.
 
-    `models show`        print current rating (arena.ai leaderboard or static
-                         TOML fallback) sorted by score.
+    `models show`        print current rating (arena.ai leaderboard
+    code/webdev/fullstack or static TOML fallback) sorted by score.
     `models refresh`     force-fetch the arena.ai leaderboard and refresh the
                          cache in .ai_pobisk/arena_leaderboard_cache.json.
     """
@@ -987,14 +987,16 @@ def cmd_models(repo_root, args):
     if sub == "refresh":
         live = _fetch_json(ARENA_LEADERBOARD_URL)
         if not live:
-            print("models: cannot reach arena.ai leaderboard, keeping cache")
+            print("models: cannot reach arena.ai leaderboard (%s), keeping cache"
+                  % ARENA_LEADERBOARD_URL)
             return 1
         models = _parse_arena_models(live)
         if not models:
             print("models: arena.ai returned no parseable models")
             return 1
         _save_cached_arena(repo_root, models)
-        print("models: refreshed %d models from arena.ai leaderboard" % len(models))
+        print("models: refreshed %d models from arena.ai leaderboard (%s)"
+              % (len(models), ARENA_LEADERBOARD_URL))
         for mid, score in sorted(models.items(), key=lambda kv: -kv[1])[:10]:
             print("  %-60s %d" % (mid, score))
         return 0
@@ -1004,7 +1006,8 @@ def cmd_models(repo_root, args):
     if not models:
         print("models: no rating data available")
         return 1
-    print("models: %d models rated (default score: %d)" % (len(models), default_score))
+    print("models: %d models rated (default score: %d)"
+          % (len(models), default_score))
     print()
     print("%-60s %s" % ("model", "score"))
     print("-" * 70)

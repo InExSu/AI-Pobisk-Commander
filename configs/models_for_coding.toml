@@ -1,8 +1,7 @@
 # models_for_coding.toml — рейтинг моделей для целей программирования.
 #
-# Источник: https://arena.ai/leaderboard/code/webdev (рейтинг по Score / ELO,
-# собран 2026-10-27, 952 039 голосов, 153 модели).
-# Чем выше число, тем лучше модель для кодинга.
+# Источник: https://arena.ai/leaderboard/code/webdev/fullstack (рейтинг по
+# Score / ELO, собран вручную). Чем выше число, тем лучше модель для кодинга.
 #
 # Используется супервайзером ai_Pobisk при выборе модели для шага:
 #   * первый вызов модели берёт модель с наивысшим рейтингом;
@@ -13,8 +12,9 @@
 # "cline-free/deepseek-v4.1-flash" и т.д.). Неизвестная модель получает
 # default.score (см. секцию [default]).
 #
-# Если arena.ai доступен, рейтинг загружается с его leaderboard и кэшируется
-# в .ai_pobisk/arena_leaderboard_cache.json на 24 часа. Этот файл — статический
+# Если arena.ai доступен, рейтинг загружается с его leaderboard
+# (https://arena.ai/api/v1/leaderboard/code/webdev/fullstack) и кэшируется в
+# .ai_pobisk/arena_leaderboard_cache.json на 24 часа. Этот файл — статический
 # фолбэк, собранный вручную из leaderboard arena.ai/leaderboard/code/webdev.
 
 [default]

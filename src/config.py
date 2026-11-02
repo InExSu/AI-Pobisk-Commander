@@ -278,7 +278,11 @@ def load(repo_root):
 
 # ── Arena.ai leaderboard: live model rating for coding ──────────────────────
 
-ARENA_LEADERBOARD_URL = "https://arena.ai/api/v1/leaderboard"
+# Источник правды: https://arena.ai/leaderboard/code/webdev/fullstack
+# (рейтинг моделей для задач fullstack-разработки). APIendpoint сайта
+# защищён Cloudflare — при недоступности используется статический фолбэк
+# configs/models_for_coding.toml.
+ARENA_LEADERBOARD_URL = "https://arena.ai/api/v1/leaderboard/code/webdev/fullstack"
 ARENA_CACHE_TTL_SEC = 24 * 3600  # keep a fetched leaderboard for one day
 
 

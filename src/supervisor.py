@@ -247,11 +247,12 @@ class Supervisor:
         self._sync_no_filesystem()
         # ── Model quality rating for coding ──────────────────────────────
         # models_for_coding.toml maps model_id -> score. Higher = better.
-        # Unknown models fall back to default.score (50). Used by
+        # Unknown models fall back to default_score. Used by
         # _ranked_models() to try better models first on every step.
-        self._model_ranking, self._model_default = load_model_ranking(repo_root)
+        self._model_ranking, self._model_default_score = load_model_ranking(repo_root)
         if self._model_ranking:
-            self._say("  model rating: %d models loaded" % len(self._model_ranking))
+            source = "arena.ai leaderboard" if self._model_ranking else "static TOML"
+            self._say("  model rating: %d models loaded (%s)" % (len(self._model_ranking), source))
 
     def _sync_no_filesystem(self):
         """Hand the configured no-filesystem list to classify.
@@ -829,7 +830,7 @@ class Supervisor:
         if not models:
             return []
         ranking = self._model_ranking
-        default_score = self._model_default.get("score", 50)
+        default_score = self._model_default_score
         tried = self._tried.get(skill, set())
 
         def sort_key(m):

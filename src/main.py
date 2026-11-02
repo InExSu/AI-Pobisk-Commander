@@ -22,6 +22,7 @@ Commands:
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from concurrent import futures
@@ -772,6 +773,42 @@ def cmd_self_test(repo_root, args):
     return 0 if tasks and not problems else 1
 
 
+def _prewarm_cline_accounts(repo_root, cfg, adapters):
+    """Run a quick probe on each cline account to refresh tokens before long run."""
+    try:
+        accounts_dir = os.path.expanduser("~/.cline/accounts")
+        if not os.path.isdir(accounts_dir):
+            return
+        print("prewarm: checking cline accounts...")
+        for name in sorted(os.listdir(accounts_dir)):
+            acc_dir = os.path.join(accounts_dir, name)
+            if not os.path.isdir(acc_dir):
+                continue
+            providers = os.path.join(acc_dir, "settings", "providers.json")
+            if not os.path.exists(providers):
+                continue
+            # Quick probe with short timeout directly via cline binary
+            import subprocess
+            try:
+                rc, out, err = subprocess.run(
+                    ["cline", "--auto-approve", "true", "--retries", "1",
+                     "--data-dir", acc_dir, "--timeout", "30",
+                     "Reply with exactly: ok"],
+                    capture_output=True, text=True, timeout=45
+                ).returncode, "", ""
+            except subprocess.TimeoutExpired:
+                print("  prewarm: %s -> timeout" % name)
+                continue
+            except Exception:
+                rc = -1
+            if rc == 0:
+                print("  prewarm: %s -> ok" % name)
+            else:
+                print("  prewarm: %s -> rc=%d (token may need refresh)" % (name, rc))
+    except Exception as e:
+        print("  prewarm skipped: %s" % type(e).__name__)
+
+
 def cmd_run(repo_root, args):
     cfg, adapters = build(repo_root)
     j = journal_mod.Journal(repo_root, cfg)
@@ -805,6 +842,24 @@ def cmd_run(repo_root, args):
     except Exception as e:
         print("logrot skipped: %s" % type(e).__name__)
 
+    # Pre-warm cline accounts: refresh tokens before long run to avoid browser auth mid-task
+    if not args.dry_run:
+        _prewarm_cline_accounts(repo_root, cfg, adapters)
+
+    # Refresh model rating cache from arena.ai leaderboard if requested.
+    if args.refresh_models:
+        from config import _fetch_json, _parse_arena_models, _save_cached_arena, ARENA_LEADERBOARD_URL
+        live = _fetch_json(ARENA_LEADERBOARD_URL)
+        if live:
+            models = _parse_arena_models(live)
+            if models:
+                _save_cached_arena(repo_root, models)
+                print("models: refreshed %d models from arena.ai leaderboard" % len(models))
+            else:
+                print("models: arena.ai returned no parseable models, keeping cache")
+        else:
+            print("models: cannot reach arena.ai leaderboard, keeping cache")
+
     m = meta_mod.Meta(repo_root, cfg, adapters)
     if not args.dry_run:
         print("selecting meta model...")
@@ -834,9 +889,29 @@ def _run_tasks(repo_root, cfg, tasks, sv, args):
     par = cfg.get("parallel") or {}
     results = {}
 
+    def _move_completed(task_name):
+        """Move completed task file to configs/disabled/ atomically."""
+        tasks_dir = os.path.join(repo_root, cfg["tasks"]["dir"])
+        disabled_dir = os.path.join(repo_root, "configs", "disabled")
+        os.makedirs(disabled_dir, exist_ok=True)
+        src = os.path.join(tasks_dir, task_name)
+        dst = os.path.join(disabled_dir, task_name)
+        try:
+            if not os.path.exists(src):
+                return
+            # Atomic move: rename within same filesystem
+            tmp_dst = dst + ".tmp.%d" % os.getpid()
+            shutil.move(src, tmp_dst)
+            os.rename(tmp_dst, dst)
+            print("  archived: %s -> %s" % (task_name, disabled_dir))
+        except Exception as e:
+            print("  warning: failed to archive %s: %s" % (task_name, e))
+
     if args.dry_run or not par.get("enabled"):
         for t in tasks:
             results[t.name] = sv.run_task(t, dry_run=args.dry_run)
+            if results[t.name] == "done" and not args.dry_run:
+                _move_completed(t.name)
             print()
         return results
 
@@ -854,6 +929,8 @@ def _run_tasks(repo_root, cfg, tasks, sv, args):
     if n == 1:
         for t in tasks:
             results[t.name] = sv.run_task(t, dry_run=False)
+            if results[t.name] == "done":
+                _move_completed(t.name)
             print()
         return results
 
@@ -867,6 +944,8 @@ def _run_tasks(repo_root, cfg, tasks, sv, args):
             except Exception as e:
                 results[name] = "error: %s" % type(e).__name__
                 print("  %s -> error: %s" % (name, e))
+            if results[name] == "done":
+                _move_completed(name)
             print()
     return results
 
@@ -892,6 +971,48 @@ def cmd_issues(repo_root, args):
     return 0
 
 
+def cmd_models(repo_root, args):
+    """Model rating for coding tasks.
+
+    `models show`        print current rating (arena.ai leaderboard or static
+                         TOML fallback) sorted by score.
+    `models refresh`     force-fetch the arena.ai leaderboard and refresh the
+                         cache in .ai_pobisk/arena_leaderboard_cache.json.
+    """
+    from config import (_fetch_json, _parse_arena_models, _save_cached_arena,
+                        _load_cached_arena, load_model_ranking,
+                        ARENA_LEADERBOARD_URL)
+    sub = getattr(args, "sub", "show") or "show"
+
+    if sub == "refresh":
+        live = _fetch_json(ARENA_LEADERBOARD_URL)
+        if not live:
+            print("models: cannot reach arena.ai leaderboard, keeping cache")
+            return 1
+        models = _parse_arena_models(live)
+        if not models:
+            print("models: arena.ai returned no parseable models")
+            return 1
+        _save_cached_arena(repo_root, models)
+        print("models: refreshed %d models from arena.ai leaderboard" % len(models))
+        for mid, score in sorted(models.items(), key=lambda kv: -kv[1])[:10]:
+            print("  %-60s %d" % (mid, score))
+        return 0
+
+    # show (default)
+    models, default_score = load_model_ranking(repo_root)
+    if not models:
+        print("models: no rating data available")
+        return 1
+    print("models: %d models rated (default score: %d)" % (len(models), default_score))
+    print()
+    print("%-60s %s" % ("model", "score"))
+    print("-" * 70)
+    for mid, score in sorted(models.items(), key=lambda kv: -kv[1]):
+        print("%-60s %d" % (mid, score))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog="ai_Pobisk.sh", description="supervisor for CLI AI agents")
@@ -899,7 +1020,7 @@ def main():
                     choices=["run", "list", "status", "skills", "self-test",
                              "graft", "watch", "check", "serve", "report",
                              "tail", "drakon", "mail", "signup", "login",
-                             "repair", "issues"])
+                             "repair", "issues", "models"])
     ap.add_argument("--task", help="run only this task file name")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the plan, do not call any model")
@@ -976,6 +1097,9 @@ def main():
                     help="alias for the `list` command")
     ap.add_argument("--self-test", dest="flag_self_test", action="store_true",
                     help="alias for the `self-test` command")
+    # ── models (arena.ai leaderboard rating) ─────────────────────────────
+    ap.add_argument("--refresh-models", action="store_true",
+                    help="models: refresh rating cache from arena.ai leaderboard")
     args = ap.parse_args()
 
     if args.flag_list:
@@ -990,7 +1114,7 @@ def main():
           "serve": cmd_serve, "report": cmd_report, "tail": cmd_tail,
           "drakon": cmd_drakon, "mail": cmd_mail, "signup": cmd_signup,
           "login": cmd_login, "repair": cmd_repair,
-          "issues": cmd_issues}[args.command]
+          "issues": cmd_issues, "models": cmd_models}[args.command]
     return fn(repo_root, args)
 
 
